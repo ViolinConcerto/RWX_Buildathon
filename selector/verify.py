@@ -423,7 +423,7 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             stage_report = {"error": repr(e)[:200]}  # fall back to the subset below / whole test
             if tpcds_indices is None:
                 tpcds_indices = None
-    if not import_errors and any(n.startswith("tests/test_executor.py::") for n in nodeids):
+    if not import_errors and LAZY and any(n.startswith("tests/test_executor.py::") for n in nodeids):
         try:
             importlib.import_module("tests.test_executor").ProcessPoolExecutor = LazyPickleExecutor
         except BaseException as e:  # noqa: BLE001
@@ -474,6 +474,7 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
 
 
 FIRST_ROUND = 8
+LAZY = os.environ.get("BR_LAZY", "1") == "1"  # ablation switch (default unchanged)
 
 
 def _isolated_run(nodeids, stop_on_fail, entry_filter) -> dict:
@@ -836,7 +837,8 @@ def collect(jobs: list[Job], poll: float = 0.05) -> list[tuple[Job, dict | None]
                     j.buf.extend(chunk)
                     continue
                 os.close(j.rfd)
-                os.waitpid(j.pid, 0)
+                _, _, ru = os.wait4(j.pid, 0)
+                j.cpu = ru.ru_utime + ru.ru_stime
                 try:
                     done.append((j, json.loads(bytes(j.buf).decode())))
                 except Exception:  # noqa: BLE001
@@ -849,7 +851,8 @@ def collect(jobs: list[Job], poll: float = 0.05) -> list[tuple[Job, dict | None]
                 except ProcessLookupError:
                     pass
                 os.close(j.rfd)
-                os.waitpid(j.pid, 0)
+                _, _, ru = os.wait4(j.pid, 0)
+                j.cpu = ru.ru_utime + ru.ru_stime
                 done.append((j, None))
     for j, _ in done:
         jobs.remove(j)

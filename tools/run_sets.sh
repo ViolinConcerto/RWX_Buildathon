@@ -8,7 +8,7 @@ tsim=0; tcpu=0; tmiss=0
 for set in "$@"; do
   name=$(basename "$set"); out=work/${tag}_$name.jsonl
   start=$(date +%s.%N)
-  docker run --rm --platform linux/amd64 --network none --cpus 2 --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp "${extra[@]}" --volume "$PWD/$set/commits:/data/commits:ro" --volume "$PWD/$set/tests.json:/data/tests.json:ro" blast-radius-entry sh -c 'python /app/selector/main.py; rc=$?; grep usage_usec /sys/fs/cgroup/cpu.stat >&2; exit $rc' > "$out" 2> "${out%.jsonl}.log"
+  docker run --rm --platform linux/amd64 --network none --cpus 2 --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp "${extra[@]}" --volume "$PWD/$set/commits:/data/commits:ro" --volume "$PWD/$set/tests.json:/data/tests.json:ro" "${IMAGE:-blast-radius-entry}" sh -c 'python /app/selector/main.py; rc=$?; grep usage_usec /sys/fs/cgroup/cpu.stat >&2; exit $rc' > "$out" 2> "${out%.jsonl}.log"
   wall=$(echo "$(date +%s.%N) - $start" | bc)
   cpu=$(awk '/usage_usec/ {print $2/1000000}' "${out%.jsonl}.log")
   res=$(python3 starter/score.py "$set" "$set/answers.json" "$out")

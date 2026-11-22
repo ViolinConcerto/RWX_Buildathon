@@ -233,11 +233,13 @@ def category(a) -> str:
 def plan_verification(a, tests_by_num, dur) -> dict | None:
     """Expected-cost comparison: run candidates vs select them blindly."""
     if a.everything or not a.candidates:
+        a.plan_note = "everything" if a.everything else "no candidates"
         return None
     if any(p is None for p in a.new_files.values()) or any(
         rel not in () and content is not None and not os.path.exists(os.path.join(SRC, rel))
         for rel, content in a.new_files.items()
     ):
+        a.plan_note = "added/removed files"
         return None  # added/removed files: listings would differ; keep static answer
     cands = sorted(a.candidates)
     blind = cost_of(partition(cands, dur), dur) / 1000
@@ -261,6 +263,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     proxy_ok = (MAX_NODES_PROXY and any(tests_by_num[n]["id"] == MAX_NODES_ID for n in held)
                 and "tests/test_parser.py" not in a.new_files and "tests/helpers.py" not in a.new_files)
     if not run and not (proxy_ok and all(tests_by_num[n]["id"] == MAX_NODES_ID for n in held)):
+        a.plan_note = "nothing runnable (held only)"
         return None
     files = {tests_by_num[n]["file"] for n in run}
 
@@ -311,6 +314,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
                      and "tests/test_parser.py" not in a.new_files and "tests/helpers.py" not in a.new_files)
         tpcds_held = TPCDS_ID in held_ids
         if not RULE_A1 and (tpcds_held or not use_proxy):
+            a.plan_note = "held, A1 off"
             return None
         plan["proxy"] = use_proxy
         # Held tests: tpcds (rule A1) is selected only if a runnable candidate fails;
@@ -346,7 +350,10 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
             p_heavy = 0.3  # P(max_nodes itself fails | it is a candidate): no labeled case so far
             expected = cpu + proxy_cpu + p_heavy * (heavy_blind + 2.0 + light) + (1 - p_heavy) * p * light
         plan.update(drop_held_if_clean=True, gain=blind - expected, cpu=cpu + proxy_cpu)
-        return plan if plan["gain"] >= MIN_GAIN else None
+        if plan["gain"] < MIN_GAIN:
+            a.plan_note = f"expected gain {plan['gain']:.2f} < {MIN_GAIN} (held plan, cpu {plan['cpu']:.1f})"
+            return None
+        return plan
     if tpcds_num is not None:
         rest = [n for n in cands if n != tpcds_num]
         blind_rest = cost_of(partition(rest, dur), dur) / 1000
@@ -362,7 +369,10 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     long_plan = longest_plan(a, cands, run, tests_by_num, dur, test_cpu, file_setup, p, blind, entry_plan, subset,
                              tpcds_num)
     best = max((x for x in (plan, long_plan) if x is not None), key=lambda x: x["gain"])
-    return best if best["gain"] >= MIN_GAIN else None
+    if best["gain"] < MIN_GAIN:
+        a.plan_note = f"expected gain {best['gain']:.2f} < {MIN_GAIN} (cpu {best['cpu']:.1f}, blind {blind:.1f})"
+        return None
+    return best
 
 
 def longest_plan(a, cands, run, tests_by_num, dur, test_cpu, file_setup, p, blind, entry_plan, subset, tpcds_num):
@@ -577,6 +587,11 @@ def main() -> int:
                 a.everything = True
                 results[cid] = full
 
+    try:
+        audit_log(patches, analyses, results, full, tests_by_num, dur)
+    except Exception as e:  # noqa: BLE001
+        log(f"audit log failed: {e!r}")
+
     if REPORT_FD is not None:
         for p in patches:
             send_answer("F", p.stem, results.get(p.stem, full))
@@ -657,6 +672,43 @@ def check_imports(analyses, results, full, t0) -> None:
             log(f"{cid}: patched modules import ok ({time.monotonic() - tc:.2f}s): {sorted(a.import_check)}")
 
 
+AUDIT_VERIFIED: dict = {}  # logging only (audit branch)
+
+
+def audit_log(patches, analyses, results, full, tests_by_num, dur) -> None:
+    """One AUDIT line per commit: how its final answer was obtained (logging only)."""
+    heavy = {t for t, x in tests_by_num.items() if x["id"] in (TPCDS_ID, MAX_NODES_ID)}
+    for p in patches:
+        cid = p.stem
+        a = analyses.get(cid)
+        res = results.get(cid, full)
+        sel = sorted({x for w in res for x in w})
+        v = AUDIT_VERIFIED.get(cid)
+        if a is None or a.everything:
+            cls = "everything"
+        elif v is not None:
+            cls = "verified"
+        elif not sel:
+            cls = "empty"
+        elif set(sel) & heavy:
+            cls = "heavy_unverified"
+        elif not a.python_changed:
+            cls = "blind_data"
+        else:
+            cls = "blind_code"
+        rec = {"cid": cid, "cls": cls, "sel": sel, "final": cost_of(res, dur) / 1000}
+        if a is not None:
+            rec.update(everything=a.everything, def_everything=a.def_everything, base_everything=a.base_everything,
+                       other_facts=a.other_facts, python_changed=a.python_changed, n_cands=len(a.candidates),
+                       n_base=len(a.base_candidates), n_def=len(a.def_candidates),
+                       static=(cost_of(full, dur) if a.everything else cost_of(partition(sorted(a.candidates), dur), dur)) / 1000,
+                       base=cost_of(partition(sorted(a.base_candidates), dur), dur) / 1000,
+                       note=getattr(a, "plan_note", None), reasons=[r[:120] for r in a.reasons[:3]])
+        if v is not None:
+            rec.update(v)
+        log("AUDIT " + json.dumps(rec))
+
+
 def plan_all(analyses, tests_by_num, dur) -> dict:
     out = {}
     for cid, a in analyses.items():
@@ -693,6 +745,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             est_wall = plan["cpu"] * 1.5 + 1.0
             if est_wall > remaining:
                 log(f"{cid}: skip verify (budget)")
+                analyses[cid].plan_note = "budget skip"
                 continue
             a = analyses[cid]
             nodeids = [tests_by_num[x]["id"] for x in plan["run"]]
@@ -714,6 +767,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             wall = time.monotonic() - job.started
             shutil.rmtree(os.path.join(TMP, cid), ignore_errors=True)
             if not report or not report.get("ok"):
+                analyses[cid].plan_note = f"verify failed: {report.get('error') if report else 'timeout/crash'}"[:120]
                 log(f"{cid}: verify FAILED ({report.get('error') if report else 'timeout/crash'}) "
                     f"after {wall:.2f}s -> static")
                 continue
@@ -724,6 +778,8 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                 log(f"{cid}: patched import FAILED in verification {a_import_errors} -> everything")
                 continue
             analyses[cid].import_ok = True
+            AUDIT_VERIFIED[cid] = {"child_cpu": round(getattr(job, "cpu", 0.0), 3), "planned_cpu": round(plan["cpu"], 3),
+                                   "stage": report.get("tpcds_stage"), "kind": plan.get("kind", "all")}
             failed_ids = set(report["failed"])
             seen = set(report["seen"]) | set(report.get("proven_pass", ()))
             if report.get("tpcds_stage"):
