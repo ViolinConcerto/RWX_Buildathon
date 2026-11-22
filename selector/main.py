@@ -327,6 +327,7 @@ def longest_plan(a, cands, run, tests_by_num, dur, test_cpu, file_setup, p, blin
 
 
 REPORT_FD = None  # set in the supervised child: records go to the supervisor, not stdout
+VERIFIED: set[str] = set()  # commits whose final answer came from a verification run
 
 
 def send_answer(kind: str, cid: str, workers) -> None:
@@ -512,6 +513,42 @@ def main() -> int:
                 a.everything = True
                 results[cid] = full
 
+    # Classify every commit by how its final answer was obtained (for logs and for
+    # measurement probes: BR_PROBE_EMPTY=<classes> prints [] for those commits so the
+    # practice board's aggregate reveals each class's cost and how many of them fail).
+    heavy_nums = {t["number"] for t in tests if t["id"] in (TPCDS_ID, MAX_NODES_ID,
+                  "tests/test_generator.py::TestGenerator::test_generator_memory")}
+    classes: dict[str, str] = {}
+    for p in patches:
+        cid = p.stem
+        a = analyses.get(cid)
+        sel = {x for w in results.get(cid, full) for x in w}
+        if a is None or a.everything:
+            cls = "everything"
+        elif sel & heavy_nums:
+            cls = "heavy"
+        elif not sel:
+            cls = "empty"
+        elif cid in VERIFIED:
+            cls = "verified"
+        elif not a.python_changed:
+            cls = "blind_data"
+        else:
+            cls = "blind_code"
+        classes[cid] = cls
+    counts: dict[str, list] = {}
+    for cid, cls in classes.items():
+        counts.setdefault(cls, [0, 0.0])
+        counts[cls][0] += 1
+        counts[cls][1] += cost_of(results.get(cid, full), dur) / 1000
+    log("CLASSES " + ", ".join(f"{k}: {v[0]} commits {v[1]:.1f}s" for k, v in sorted(counts.items())))
+    probe = {x for x in os.environ.get("BR_PROBE_EMPTY", "").split(",") if x}
+    if probe:
+        for cid, cls in classes.items():
+            if "all" in probe or cls in probe:
+                results[cid] = []
+        log(f"PROBE: emptied classes {sorted(probe)}")
+
     if REPORT_FD is not None:
         for p in patches:
             send_answer("F", p.stem, results.get(p.stem, full))
@@ -676,6 +713,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                     and plan["drop_held_if_clean"]:
                 chosen |= {h for h in plan["held"] if tests_by_num[h]["id"] == TPCDS_ID}
             results[cid] = partition(chosen, dur)
+            VERIFIED.add(cid)
             send_answer("F", cid, results[cid])  # verified (imports checked in the child): final
             if plan.get("tpcds_subset") is not None:
                 log(f"{cid}: tpcds restricted to {len(plan['tpcds_subset'])} queries")
