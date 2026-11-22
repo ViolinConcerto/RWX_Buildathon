@@ -259,7 +259,8 @@ def _install_tpcds_subset(indices: list[int]) -> None:
     """
     te = importlib.import_module("tests.test_executor")
     cls = te.TestExecutor
-    original = cls.setUpClass.__func__
+    original = cls.__dict__.get("_br_setup") or cls.setUpClass.__func__  # re-installable
+    cls._br_setup = original
     keep = list(dict.fromkeys(indices))  # caller's order (cheapest first)
 
     def setUpClass(klass):
@@ -472,6 +473,9 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
     os.close(wfd)
 
 
+FIRST_ROUND = 8
+
+
 def _isolated_run(nodeids, stop_on_fail, entry_filter) -> dict:
     """run_unittest, restoring the unittest.TestCase methods it replaces (several runs
     in one child)."""
@@ -511,24 +515,43 @@ def _run_conditional(nodeids, entry_filter, two_stage, tpcds_id) -> dict:
     if not (rep["failed"] or rep["collect_errors"]):
         return rep
     rep["conditional_skipped"] = []
+    import resource
+
+    def cpu():
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        return r.ru_utime + r.ru_stime
+
+    c0 = cpu()
     try:
         import tpcplan
 
         with open(os.path.join(TPC_STORE, "plans.json")) as f:
             base = json.load(f)
-        changed = tpcplan.stage1(two_stage["front"], base)
         cost = two_stage.get("cost", {})
-        stage2 = sorted(set(two_stage["data"]) | set(changed), key=lambda i: (cost.get(str(i), 0.0), i))
-        rep["tpcds_stage"] = {"conditional": "ran", "front": len(two_stage["front"]), "changed": len(changed),
-                              "stage2": len(stage2)}
-        if stage2:
+        key = lambda i: (cost.get(str(i), 0.0), i)  # noqa: E731
+        front = sorted(two_stage["front"], key=key)
+        # Rounds: the forced queries plus the first few re-planned ones, then the rest. A
+        # failing tpcds usually shows in the first round, before most of stage 1 is paid.
+        rounds = [(sorted(two_stage["data"], key=key), front[:FIRST_ROUND]), ([], front[FIRST_ROUND:])]
+        n_changed = n_run = 0
+        tp_ok = True
+        for forced, to_plan in rounds:
+            changed = tpcplan.stage1(to_plan, base) if to_plan else []
+            n_changed += len(changed)
+            stage2 = sorted(set(forced) | set(changed), key=key)
+            if not stage2:
+                continue
+            n_run += len(stage2)
             _install_tpcds_subset(stage2)
             more = _isolated_run([tpcds_id], False, {})
             _merge(rep, more)
-            tp_ok = tpcds_id in more["seen"] and tpcds_id not in more["failed"] and not more["collect_errors"]
-        else:
+            if tpcds_id not in more["seen"] or tpcds_id in more["failed"] or more["collect_errors"]:
+                tp_ok = False
+                break
+        rep["tpcds_stage"] = {"conditional": "ran", "front": len(front), "changed": n_changed, "stage2": n_run,
+                              "cpu": round(cpu() - c0, 3), "tpcds": "pass" if tp_ok else "fail"}
+        if tp_ok and not n_run:
             rep["proven_pass"] = [tpcds_id]
-            tp_ok = True
     except BaseException as e:  # noqa: BLE001  (tpcds stays unseen -> selected)
         rep["tpcds_stage"] = {"conditional": "error", "error": repr(e)[:200]}
         return rep

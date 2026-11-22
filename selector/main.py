@@ -132,7 +132,10 @@ try:
 except Exception:  # noqa: BLE001
     QPHASE, QPHASE_COMMON = None, {}
 TWO_STAGE = os.environ.get("BR_TWO_STAGE", "1") == "1"
-P_PLAN_CHANGES = 0.5  # pessimistic: chance that an edit reaching a query's front changes its plan
+P_PLAN_CHANGES = 0.25  # chance that an edit reaching a query's front changes its plan (labeled: 0/55, 3/57, 0/6
+                       # where tpcds passed; mostly-changed cases failed early under the lazy executor)
+STAGE1_PER_QUERY = 0.08  # container CPU: o017 (55 queries) +6.3 s incl. 1.7 s finishing the rest
+FAIL_CHECK_CPU = 1.5     # a failing tpcds check usually stops in the first round (o013 0.45 s)
 
 
 def tpcds_two_stage(a):
@@ -159,7 +162,7 @@ def tpcds_two_stage(a):
     cpu_d = QPHASE["cpu"]["D"]
     cpu_f = [f + t for f, t in zip(QPHASE["cpu"]["F"], QPHASE["cpu"].get("T", [0.0] * QPHASE["n"]))]
     data_cost = lambda i: cpu_d[i] + 0.06  # noqa: E731  (compare answered by the TPC store)
-    cpu = 0.15 + sum(cpu_f[i] + 0.03 for i in front) + sum(cpu_f[i] + data_cost(i) for i in forced) \
+    cpu = 0.3 + STAGE1_PER_QUERY * len(front) + sum(cpu_f[i] + data_cost(i) for i in forced) \
         + P_PLAN_CHANGES * sum(data_cost(i) for i in front)
     return {"front": sorted(front), "data": sorted(forced), "cpu": cpu,
             "cost": {str(i): round(cpu_d[i], 4) for i in front | forced}}
@@ -326,7 +329,10 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
                 blind_rest = cost_of(partition(rest, dur), dur) / 1000
                 light = min(blind_rest, 2.0 + 0.3 * max(0.0, blind_rest - 2.0)) if rest else 2.0
                 q = P_TPCDS_GIVEN_BREAK
-                cond_cost = ts["cpu"] + q * blind + (1 - q) * (light + 0.7 * (cpu - fixed))
+                # finishing the candidates step 1 skipped: ~70% of the planned variable CPU,
+                # and planned CPU runs ~2.4x the measured (110 labeled commits: 87.6 / 214.1)
+                cond_cost = q * (blind + min(ts["cpu"], FAIL_CHECK_CPU)) \
+                    + (1 - q) * (ts["cpu"] + light + 0.3 * (cpu - fixed))
                 if cond_cost < blind or COND_FORCE:
                     fail_cost = cond_cost
                     plan["tpcds_conditional"] = ts
