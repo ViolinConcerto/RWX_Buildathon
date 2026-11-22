@@ -596,6 +596,9 @@ def run_unittest(nodeids: list[str], stop_on_fail: bool = False, entry_filter=No
             last[0] = _cpu()
 
         def stopTest(self, test):
+            # Class/module fixtures (setUpClass of the next class) run between tests:
+            # they must never see the previous test's fixture-entry filter.
+            current_test[0] = None
             handler, cw = capture.pop(test.id(), (None, None))
             if cw is not None:
                 cw.__exit__(None, None, None)
