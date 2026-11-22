@@ -27,5 +27,5 @@ COPY selector /app/selector
 COPY maps /app/maps
 RUN chmod -R a+rX /app && python -m compileall -q /app/selector
 
-ENV BR_SRC=/opt/sqlglot PYTHONDONTWRITEBYTECODE=1 BR_PROBE_DROP_TPCDS_HEAVY=1
+ENV BR_SRC=/opt/sqlglot PYTHONDONTWRITEBYTECODE=1 BR_PROBE_DROP_TPCDS_HEAVY=unverified
 CMD ["python", "/app/selector/main.py"]

@@ -542,10 +542,13 @@ def main() -> int:
         counts[cls][0] += 1
         counts[cls][1] += cost_of(results.get(cid, full), dur) / 1000
     log("CLASSES " + ", ".join(f"{k}: {v[0]} commits {v[1]:.1f}s" for k, v in sorted(counts.items())))
-    if os.environ.get("BR_PROBE_DROP_TPCDS_HEAVY") == "1":
+    drop_mode = os.environ.get("BR_PROBE_DROP_TPCDS_HEAVY", "")
+    if drop_mode in ("1", "unverified"):
         tp = next(t["number"] for t in tests if t["id"] == TPCDS_ID)
         for cid, cls in classes.items():
             sel = {x for w in results.get(cid, full) for x in w}
+            if drop_mode == "unverified" and cid in VERIFIED:
+                continue  # P6: only commits whose answer did not come from a verification run
             if cls == "heavy" and tp in sel:
                 results[cid] = partition(sel - {tp}, dur)
         log("PROBE: dropped tpcds from heavy-class commits")
