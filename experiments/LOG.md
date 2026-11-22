@@ -56,3 +56,19 @@ Swap set s1 (40 is/== swaps, 70% at provable sites): r12 105.8 s simulated, 0 mi
 - Inline tpcds: 37.9 s CPU + 3.25 s class setup; per query ≤ 1.65 s.
 - Changed-line query subsets are bimodal: ~57 queries (hot executor/optimizer paths) or 1–6.
 - On m1, 3 commits would save ~12–18 s each, 1 would lose 8 s; on the sample, 0 (both tpcds commits fail with |S| ≥ 57).
+
+## Round after practice r12 (201.4 s, 0 missed)
+
+Practice fact: r12 saved 16.6 s simulated vs v1 on practice, vs 59.5 s on the sample (50.2 s of it from
+two sample commits). Sample-based extrapolation is not trusted any more.
+
+| Version | Change | Sample total | m1 total | s1 total | Misses | Practice |
+| --- | --- | --- | --- | --- | --- | --- |
+| r12 19c3581 | (scored) | 116.19 | 899.72 | 110.37 | 0/0/0 | **201.4 s, 0 missed** |
+| probe 80690ac | r12 minus tpcds/max_nodes/generator_memory (measurement only) | 683.5 (2 misses) | – | – | – | pending |
+| r13 344fcf6 | import-time execution not attributed to the lazily-importing test; unique keys for metaclass-built classes | 116.2 (static 120.443) | 882.1 sim | 110.3 sim | 0/0/0 | – |
+| r14 | tpcds query-subset verification; per-test CPU calibration; cheap-failure runner; wall budget 2.5 s/commit | 115.85 | 864.36 | 110.27 | 0/0/0 | pending |
+
+Mechanism evidence (pinned commit, not distribution): test_execute_tpcds executes 17.5% of covered sqlglot
+runtime lines, test_generator_memory 15% (98% of which were lazy-import artifacts, fixed in r13).
+tpcds per-line query subsets: 39% of lines reach <=5 queries, 46% reach >=36 (no partial gain there).

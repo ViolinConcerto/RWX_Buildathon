@@ -127,8 +127,28 @@ class _OutcomePlugin:
             self.collect_errors.append(report.nodeid)
 
 
+def _install_tpcds_subset(indices: list[int]) -> None:
+    """Restrict test_execute_tpcds to the given fixture queries.
+
+    The test runs one independent sub-case per TPC-DS query; queries whose base
+    execution never reached the changed lines cannot change outcome, so only
+    the others are re-run (maps/querymap.json.gz). tpcds_sqls is used by no
+    other test.
+    """
+    te = importlib.import_module("tests.test_executor")
+    cls = te.TestExecutor
+    original = cls.setUpClass.__func__
+    keep = sorted(set(indices))
+
+    def setUpClass(klass):
+        original(klass)
+        klass.tpcds_sqls = [klass.tpcds_sqls[i] for i in keep if i < len(klass.tpcds_sqls)]
+
+    cls.setUpClass = classmethod(setUpClass)
+
+
 def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], nodeids: list[str],
-           timeout_s: float, wfd: int, import_modules=()) -> None:
+           timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None) -> None:
     # Answers go to the real stdout of the parent only: silence ours.
     os.dup2(2, 1)
     sys.stdout = sys.stderr
@@ -187,6 +207,11 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             importlib.import_module(mod)
         except BaseException as e:  # noqa: BLE001
             import_errors[mod] = f"{type(e).__name__}: {e}"[:300]
+    if not import_errors and tpcds_indices is not None:
+        try:
+            _install_tpcds_subset(tpcds_indices)
+        except BaseException as e:  # noqa: BLE001
+            import_errors["tests.test_executor"] = f"{type(e).__name__}: {e}"[:300]
     if import_errors:
         report = {"ok": True, "import_errors": import_errors, "failed": [], "seen": [], "collect_errors": []}
         data = json.dumps(report).encode()
@@ -277,12 +302,79 @@ def run_unittest(nodeids: list[str]) -> dict:
         if not hit:
             failed.update(nodeids)  # unattributable fixture error: be conservative
 
+    # Only pass/fail matters here, so make failing cheap: (1) equality assertions
+    # fail without computing diffs, (2) a test stops at its first failing subtest.
+    class _Stop(Exception):
+        pass
+
+    # Same pass/fail decisions as unittest's versions (type checks kept), no diffs.
+    def _typed(kind):
+        def check(self, first, second, msg=None):
+            if not isinstance(first, kind) or not isinstance(second, kind):
+                raise self.failureException("wrong type")
+            if not first == second:
+                raise self.failureException("values differ")
+        return check
+
+    def _seq(self, seq1, seq2, msg=None, seq_type=None):
+        if seq_type is not None and (not isinstance(seq1, seq_type) or not isinstance(seq2, seq_type)):
+            raise self.failureException("wrong type")
+        if not seq1 == seq2:
+            raise self.failureException("values differ")
+
+    def _set(self, set1, set2, msg=None):
+        try:
+            set1.difference(set2)
+            set2.difference(set1)
+        except (TypeError, AttributeError):
+            raise self.failureException("invalid set") from None
+        if not set1 == set2:
+            raise self.failureException("values differ")
+
+    unittest.TestCase.assertMultiLineEqual = _typed(str)
+    unittest.TestCase.assertDictEqual = _typed(dict)
+    unittest.TestCase.assertListEqual = _typed(list)
+    unittest.TestCase.assertTupleEqual = _typed(tuple)
+    unittest.TestCase.assertSequenceEqual = _seq
+    unittest.TestCase.assertSetEqual = _set
+
+    failed_uids: set[str] = set()
+    original_subtest = unittest.TestCase.subTest
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def subTest(self, msg=unittest.case._subtest_msg_sentinel, **params):
+        with original_subtest(self, msg, **params):
+            yield
+        if self.id() in failed_uids:
+            raise _Stop("stopping after first failing subtest")
+
+    unittest.TestCase.subTest = subTest
+
+    import resource
+
+    def _cpu():
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        return r.ru_utime + r.ru_stime
+
+    times: dict[str, float] = {}
+    last = [_cpu()]
+
     class Result(unittest.TestResult):
         def startTest(self, test):
             super().startTest(test)
             nid = by_uid.get(test.id())
             if nid:
                 seen.add(nid)
+            last[0] = _cpu()
+
+        def stopTest(self, test):
+            super().stopTest(test)
+            nid = by_uid.get(test.id())
+            if nid:
+                times[nid] = round(_cpu() - last[0], 3)
+            last[0] = _cpu()
 
         def addError(self, test, err):
             super().addError(test, err)
@@ -295,14 +387,17 @@ def run_unittest(nodeids: list[str]) -> dict:
         def addSubTest(self, test, subtest, err):
             super().addSubTest(test, subtest, err)
             if err is not None:
+                failed_uids.add(test.id())
                 mark(test)
 
         def addUnexpectedSuccess(self, test):
             super().addUnexpectedSuccess(test)
             mark(test)
 
+    t0 = _cpu()
     suite.run(Result())
-    return {"ok": True, "failed": sorted(failed), "seen": sorted(seen), "collect_errors": collect_errors}
+    return {"ok": True, "failed": sorted(failed), "seen": sorted(seen), "collect_errors": collect_errors,
+            "times": times, "suite_cpu": round(_cpu() - t0, 3)}
 
 
 class Job:
@@ -313,7 +408,7 @@ class Job:
 
 
 def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], timeout_s: float,
-          import_modules=()) -> Job:
+          import_modules=(), tpcds_indices=None) -> Job:
     rfd, wfd = os.pipe()
     tmp_dir = os.path.join(tmp_root, str(key))
     sys.stdout.flush()
@@ -323,7 +418,7 @@ def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], time
         code = 0
         try:
             os.close(rfd)
-            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules)
+            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules, tpcds_indices)
         except BaseException:  # noqa: BLE001
             code = 1
         finally:

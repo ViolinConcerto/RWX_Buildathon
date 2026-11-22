@@ -41,6 +41,12 @@ try:
     CPU_FACTORS = json.loads((HERE.parent / "maps" / "cpu_factors.json").read_text())["factor"]
 except Exception:  # noqa: BLE001
     CPU_FACTORS = {}
+# Measured per-test CPU / per-file setup of the verification runner (tools/calibrate_tests.py).
+try:
+    _tc = json.loads((HERE.parent / "maps" / "test_cpu.json").read_text())
+    TEST_CPU, SETUP_CPU = _tc["test"], _tc["setup"]
+except Exception:  # noqa: BLE001
+    TEST_CPU, SETUP_CPU = {}, {}
 CPU_FACTOR_DEFAULT = 1.6
 PER_TEST_CPU = 0.002    # unittest bookkeeping per test
 BASE_OVERHEAD = 0.13    # fork + fresh patched sqlglot import (measured 0.113 s)
@@ -49,6 +55,33 @@ PER_FILE_OVERHEAD = 0.03
 # (measured: an executor test costs 2.0 s because setUpClass loads TPC-H/TPC-DS).
 FILE_SETUP_CPU = {"tests/test_executor.py": 1.9, "tests/test_optimizer.py": 0.1}
 MIN_GAIN = 0.15  # skip coin-flip verifications whose expected gain is within noise
+TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+# P(test_execute_tpcds itself fails | the commit breaks something), for commits
+# that reach it through few queries (labeled sets: 1 of 4); kept pessimistic.
+P_TPCDS_GIVEN_BREAK = 0.6
+try:
+    import gzip as _gzip
+
+    with _gzip.open(HERE.parent / "maps" / "querymap.json.gz", "rt") as _f:
+        QMAP = json.load(_f)
+    QMAP_COMMON = {rel: set(v) for rel, v in QMAP["common"].items()}
+except Exception:  # noqa: BLE001
+    QMAP, QMAP_COMMON = None, {}
+
+
+def tpcds_subset(a) -> list[int] | None:
+    """Queries of test_execute_tpcds that can observe this commit's edits, or None."""
+    if QMAP is None or a.everything or a.other_facts or not a.runtime_lines:
+        return None
+    suite = QMAP["suites"]["tpcds"]
+    out: set[int] = set()
+    for rel, lines in a.runtime_lines.items():
+        if lines & QMAP_COMMON.get(rel, set()):
+            return None  # class setup / shared code: every query is affected
+        per_line = suite["lines"].get(rel, {})
+        for ln in lines:
+            out.update(per_line.get(str(ln), ()))
+    return sorted(out)
 
 
 def log(*args) -> None:
@@ -110,16 +143,35 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     cands = sorted(a.candidates)
     files = {tests_by_num[n]["file"] for n in cands}
     blind = cost_of(partition(cands, dur), dur) / 1000
-    cpu = BASE_OVERHEAD + PER_FILE_OVERHEAD * len(files) + sum(FILE_SETUP_CPU.get(f, 0.0) for f in files) + sum(
-        CPU_FACTORS.get(tests_by_num[n]["file"], CPU_FACTOR_DEFAULT) * tests_by_num[n]["seconds"] + PER_TEST_CPU
-        for n in cands
-    )
+    tpcds_num = next((n for n in cands if tests_by_num[n]["id"] == TPCDS_ID), None)
+    subset = tpcds_subset(a) if tpcds_num is not None else None
+
+    def test_cpu(n):
+        if n == tpcds_num and subset is not None:
+            return 1.15 * sum(QMAP["suites"]["tpcds"]["cpu"][i] for i in subset) + PER_TEST_CPU
+        tid = tests_by_num[n]["id"]
+        if tid in TEST_CPU:
+            return 1.1 * TEST_CPU[tid] + PER_TEST_CPU
+        return CPU_FACTORS.get(tests_by_num[n]["file"], CPU_FACTOR_DEFAULT) * tests_by_num[n]["seconds"] + PER_TEST_CPU
+
+    def file_setup(f):
+        return SETUP_CPU[f] if f in SETUP_CPU else FILE_SETUP_CPU.get(f, 0.0)
+
+    cpu = BASE_OVERHEAD + PER_FILE_OVERHEAD * len(files) + sum(file_setup(f) for f in files) + sum(
+        test_cpu(n) for n in cands)
     p = P_BREAK[category(a)]
-    exp_fail_cost = min(blind, 2.0 + 0.3 * max(0.0, blind - 2.0))
+    if tpcds_num is not None:
+        rest = [n for n in cands if n != tpcds_num]
+        blind_rest = cost_of(partition(rest, dur), dur) / 1000
+        light = min(blind_rest, 2.0 + 0.3 * max(0.0, blind_rest - 2.0)) if rest else 2.0
+        exp_fail_cost = P_TPCDS_GIVEN_BREAK * blind + (1 - P_TPCDS_GIVEN_BREAK) * light
+    else:
+        exp_fail_cost = min(blind, 2.0 + 0.3 * max(0.0, blind - 2.0))
     expected = cpu + p * exp_fail_cost
     if blind - expected < MIN_GAIN:
         return None
-    return {"cands": cands, "blind": blind, "cpu": cpu, "gain": blind - expected}
+    return {"cands": cands, "blind": blind, "cpu": cpu, "gain": blind - expected,
+            "tpcds_subset": subset if tpcds_num is not None else None}
 
 
 def main() -> int:
@@ -236,7 +288,9 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
         return
     # Wall budget: the run limit is 3 min for the practice batch (~40 commits) and
     # 4.5 min for the final (~60). Stay well inside: ~1.6 s of wall per commit.
-    budget_end = t0 + min(150.0, max(20.0, 1.6 * n))
+    # Hard limits: 180 s (practice, ~40 commits) / 270 s (final, ~60) for the batch;
+    # static analysis takes a few seconds, two children run in parallel.
+    budget_end = t0 + min(140.0, max(30.0, 2.5 * n))
     tv = time.monotonic()
     heavy_users = sum(1 for _, _, plan in plans
                       if any(tests_by_num[x]["file"] == "tests/test_optimizer.py" for x in plan["cands"]))
@@ -257,7 +311,8 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             a = analyses[cid]
             nodeids = [tests_by_num[x]["id"] for x in plan["cands"]]
             timeout = min(remaining, max(8.0, 4 * plan["cpu"] + 5))
-            job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout, sorted(a.import_check))
+            job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout, sorted(a.import_check),
+                               plan.get("tpcds_subset"))
             meta[cid] = plan
             jobs.append(job)
         if not jobs:
@@ -286,6 +341,11 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                 failing |= {num for i, num in id2num.items() if i == ce or i.startswith(ce + "::")}
             chosen = failing | unseen
             results[cid] = partition(chosen, dur)
+            if plan.get("tpcds_subset") is not None:
+                log(f"{cid}: tpcds restricted to {len(plan['tpcds_subset'])} queries")
+            top = sorted(report.get("times", {}).items(), key=lambda kv: -kv[1])[:4]
+            log(f"{cid}: suite cpu {report.get('suite_cpu')}s (planned {plan['cpu']:.2f}s); top "
+                + ", ".join(f"{k.split('::')[-1]}={v}" for k, v in top))
             log(f"{cid}: verified {len(plan['cands'])} in {wall:.2f}s -> {len(failing)} failing, "
                 f"{len(unseen)} unseen; cost {plan['blind']:.3f}s -> {cost_of(results[cid], dur) / 1000:.3f}s")
 
