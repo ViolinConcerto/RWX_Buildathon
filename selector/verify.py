@@ -148,7 +148,8 @@ def _install_tpcds_subset(indices: list[int]) -> None:
 
 
 def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], nodeids: list[str],
-           timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None, stop_on_fail=False) -> None:
+           timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None, stop_on_fail=False,
+           entry_filter=None) -> None:
     # The selector's own heap (dependency map, cached ASTs) is inherited by the
     # fork; freeze it so tests that call gc.collect() do not traverse it.
     import gc
@@ -236,7 +237,7 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             report = {"ok": True, "failed": sorted(plugin.failed), "seen": sorted(plugin.seen),
                       "collect_errors": plugin.collect_errors}
         else:
-            report = run_unittest(nodeids, stop_on_fail)
+            report = run_unittest(nodeids, stop_on_fail, entry_filter or {})
     except BaseException as e:  # noqa: BLE001
         report = {"ok": False, "error": repr(e)}
     data = json.dumps(report).encode()
@@ -247,7 +248,38 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
     os.close(wfd)
 
 
-def run_unittest(nodeids: list[str], stop_on_fail: bool = False) -> dict:
+def _install_entry_filter(entry_filter: dict, current: list) -> None:
+    """Data-driven tests re-run only the fixture entries that can observe the edit.
+
+    entry_filter: {test node id: {fixture file: [entry indices]}}; the filter is
+    active only while that test runs (other tests read the same files unfiltered).
+    """
+    import tests.helpers as h
+
+    def wrap(orig):
+        def loader(filename, *a, **kw):
+            keep = entry_filter.get(current[0], {}).get(filename) if current[0] else None
+            if keep is None:
+                yield from orig(filename, *a, **kw)
+                return
+            keep = set(keep)
+            for i, item in enumerate(orig(filename, *a, **kw)):
+                if i in keep:
+                    yield item
+        return loader
+
+    pairs, plain = h.load_sql_fixture_pairs, h.load_sql_fixtures
+    wp, wl = wrap(pairs), wrap(plain)
+    h.load_sql_fixture_pairs, h.load_sql_fixtures = wp, wl
+    for name, mod in list(sys.modules.items()):
+        if name.startswith("tests.") and mod is not None:
+            if getattr(mod, "load_sql_fixture_pairs", None) is pairs:
+                mod.load_sql_fixture_pairs = wp
+            if getattr(mod, "load_sql_fixtures", None) is plain:
+                mod.load_sql_fixtures = wl
+
+
+def run_unittest(nodeids: list[str], stop_on_fail: bool = False, entry_filter=None) -> dict:
     """Run pytest-style node ids (file::Class::method) with plain unittest.
 
     Outcome rules match how the labels were produced with pytest: a test fails
@@ -293,6 +325,9 @@ def run_unittest(nodeids: list[str], stop_on_fail: bool = False) -> dict:
         suite.addTest(test)
 
     holder: list = []
+    current_test: list = [None]
+    if entry_filter:
+        _install_entry_filter(entry_filter, current_test)
 
     def mark(test) -> None:
         if stop_on_fail and holder:
@@ -392,6 +427,7 @@ def run_unittest(nodeids: list[str], stop_on_fail: bool = False) -> dict:
             nid = by_uid.get(test.id())
             if nid:
                 seen.add(nid)
+            current_test[0] = nid
             handler = _Capture()
             logging.getLogger().addHandler(handler)
             cw = warnings.catch_warnings(record=True)
@@ -446,7 +482,7 @@ class Job:
 
 
 def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], timeout_s: float,
-          import_modules=(), tpcds_indices=None, stop_on_fail=False) -> Job:
+          import_modules=(), tpcds_indices=None, stop_on_fail=False, entry_filter=None) -> Job:
     rfd, wfd = os.pipe()
     tmp_dir = os.path.join(tmp_root, str(key))
     sys.stdout.flush()
@@ -456,7 +492,8 @@ def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], time
         code = 0
         try:
             os.close(rfd)
-            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules, tpcds_indices, stop_on_fail)
+            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules, tpcds_indices, stop_on_fail,
+                   entry_filter)
         except BaseException:  # noqa: BLE001
             code = 1
         finally:

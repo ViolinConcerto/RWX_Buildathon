@@ -77,6 +77,42 @@ except Exception:  # noqa: BLE001
     QMAP, QMAP_COMMON = None, {}
 
 
+try:
+    with _gzip.open(HERE.parent / "maps" / "entrymap.json.gz", "rt") as _f:
+        EMAP = json.load(_f)
+    EMAP_COMMON = {t: {rel: set(v) for rel, v in d["common"].items()} for t, d in EMAP["tests"].items()}
+except Exception:  # noqa: BLE001
+    EMAP, EMAP_COMMON = None, {}
+
+
+def entry_subset(a, test_id: str):
+    """Fixture entries of a data-driven test that can observe this commit's edits.
+
+    Returns ({fixture file: [entry indices]}, cpu estimate) or None (run it whole).
+    """
+    if EMAP is None or a.everything or a.other_facts or not a.runtime_lines:
+        return None
+    info = EMAP["tests"].get(test_id)
+    if info is None:
+        return None
+    common = EMAP_COMMON[test_id]
+    for rel, lines in a.runtime_lines.items():
+        if lines & common.get(rel, set()):
+            return None  # the test's own code path (outside entries) reaches the edit
+    picked: dict[str, set[int]] = {}
+    for fname, g in info["groups"].items():
+        for rel, lines in a.runtime_lines.items():
+            per_line = g["lines"].get(rel, {})
+            for ln in lines:
+                sid = per_line.get(str(ln))
+                if sid is not None:
+                    picked.setdefault(fname, set()).update(EMAP["sets"][sid])
+    if not picked:
+        return None  # coverage says it reaches the edit but no entry does: be safe
+    cpu = info["base_cpu"] + sum(info["groups"][f]["cpu"][i] for f, idx in picked.items() for i in idx)
+    return {f: sorted(v) for f, v in picked.items()}, 1.15 * cpu + 0.01
+
+
 def tpcds_subset(a) -> list[int] | None:
     """Queries of test_execute_tpcds that can observe this commit's edits, or None."""
     if QMAP is None or a.everything or a.other_facts or not a.runtime_lines:
@@ -165,9 +201,21 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
         return None
     files = {tests_by_num[n]["file"] for n in run}
 
+    entry_plan: dict[str, dict] = {}
+    entry_cpu: dict[int, float] = {}
+    for n in cands:
+        es = entry_subset(a, tests_by_num[n]["id"])
+        if es is not None:
+            full_cpu = TEST_CPU.get(tests_by_num[n]["id"])
+            if full_cpu is None or es[1] < 1.1 * full_cpu:
+                entry_plan[tests_by_num[n]["id"]] = es[0]
+                entry_cpu[n] = es[1]
+
     def test_cpu(n):
         if n == tpcds_num:
             return subset_cpu + PER_TEST_CPU
+        if n in entry_cpu:
+            return entry_cpu[n] + PER_TEST_CPU
         tid = tests_by_num[n]["id"]
         if tid in TEST_CPU:
             return 1.1 * TEST_CPU[tid] + PER_TEST_CPU
@@ -187,7 +235,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     order = sorted(run, key=lambda n: (file_setup(tests_by_num[n]["file"]) > 0.5,
                                        cls_cost[tests_by_num[n]["id"].rsplit("::", 1)[0]],
                                        tests_by_num[n]["id"].rsplit("::", 1)[0], test_cpu(n)))
-    plan = {"cands": cands, "run": order, "held": held, "blind": blind, "cpu": cpu,
+    plan = {"cands": cands, "run": order, "held": held, "blind": blind, "cpu": cpu, "entries": entry_plan,
             "tpcds_subset": subset if (tpcds_num is not None and tpcds_num in run) else None,
             "stop_on_fail": False, "drop_held_if_clean": False}
     if held:
@@ -364,7 +412,8 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             nodeids = [tests_by_num[x]["id"] for x in plan["run"]]
             timeout = min(remaining, max(8.0, 4 * plan["cpu"] + 5))
             job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout, sorted(a.import_check),
-                               plan.get("tpcds_subset"), plan["stop_on_fail"])
+                               plan.get("tpcds_subset"), plan["stop_on_fail"],
+                               {k: v for k, v in plan.get("entries", {}).items() if k in set(nodeids)})
             meta[cid] = plan
             jobs.append(job)
         if not jobs:
@@ -397,6 +446,9 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             results[cid] = partition(chosen, dur)
             if plan.get("tpcds_subset") is not None:
                 log(f"{cid}: tpcds restricted to {len(plan['tpcds_subset'])} queries")
+            if plan.get("entries"):
+                log(f"{cid}: fixture entries restricted for {len(plan['entries'])} tests: "
+                    + ", ".join(f"{k.split('::')[-1]}={sum(len(v) for v in g.values())}" for k, g in list(plan['entries'].items())[:4]))
             top = sorted(report.get("times", {}).items(), key=lambda kv: -kv[1])[:4]
             log(f"{cid}: suite cpu {report.get('suite_cpu')}s (planned {plan['cpu']:.2f}s); top "
                 + ", ".join(f"{k.split('::')[-1]}={v}" for k, v in top))
