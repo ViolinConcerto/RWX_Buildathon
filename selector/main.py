@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import sys
 import time
 from pathlib import Path
@@ -319,6 +320,99 @@ def longest_plan(a, cands, run, tests_by_num, dur, test_cpu, file_setup, p, blin
             "stop_on_fail": False, "drop_held_if_clean": False, "gain": blind - expected, "kind": "longest"}
 
 
+REPORT_FD = None  # set in the supervised child: records go to the supervisor, not stdout
+
+
+def send_answer(kind: str, cid: str, workers) -> None:
+    """Send a provisional ("S") or final ("F") answer for one commit to the supervisor."""
+    if REPORT_FD is None:
+        return
+    data = (json.dumps([kind, cid, workers]) + "\n").encode()
+    view = memoryview(data)
+    while view:
+        view = view[os.write(REPORT_FD, view):]
+
+
+def supervise() -> int:
+    """Print an answer for every commit whatever happens to the analysis.
+
+    The analysis runs in a child (own process group). It reports safe provisional
+    answers after the static phase and final answers at the end; if it crashes,
+    hangs or nears the batch time limit, the best answer known so far is printed
+    (whole suite for commits without one).
+    """
+    global REPORT_FD
+    t0 = time.monotonic()
+    tests = json.loads((DATA / "tests.json").read_text("utf-8"))["tests"]
+    dur = {t["number"]: duration_ms(t["seconds"]) for t in tests}
+    full = partition([t["number"] for t in tests], dur)
+    patches = sorted((DATA / "commits").glob("*.patch"))
+    n = len(patches)
+    limit = 180.0 if n <= 45 else 270.0  # practice batch 3 min, final 4.5 min
+    deadline = t0 + float(os.environ.get("BR_DEADLINE", limit - 25.0))
+    rfd, wfd = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            os.close(rfd)
+            os.setpgid(0, 0)
+            REPORT_FD = wfd
+            code = main()
+        except BaseException as e:  # noqa: BLE001
+            log(f"analysis crashed: {type(e).__name__}: {e}")
+        finally:
+            os._exit(code)
+    os.close(wfd)
+    import select
+
+    best: dict[str, tuple[int, list]] = {}
+    buf = b""
+    timed_out = False
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        ready, _, _ = select.select([rfd], [], [], min(left, 1.0))
+        if not ready:
+            continue
+        chunk = os.read(rfd, 1 << 16)
+        if not chunk:
+            break
+        buf += chunk
+        *lines, buf = buf.split(b"\n")
+        for line in lines:
+            try:
+                kind, cid, workers = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            rank = 2 if kind == "F" else 1
+            if rank >= best.get(cid, (0, None))[0]:
+                best[cid] = (rank, workers)
+    if timed_out:
+        log(f"SUPERVISOR: analysis still running at {time.monotonic() - t0:.1f}s; using best known answers")
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+    known = sum(1 for p in patches if p.stem in best)
+    finals = sum(1 for p in patches if best.get(p.stem, (0,))[0] == 2)
+    out = sys.stdout
+    for p in patches:
+        out.write(json.dumps({"commit": p.stem, "workers": best.get(p.stem, (0, full))[1]}) + "\n")
+    out.flush()
+    log(f"SUPERVISOR: {n} commits, {finals} final, {known - finals} provisional, {n - known} whole suite; "
+        f"{time.monotonic() - t0:.2f}s")
+    return 0
+
+
 def main() -> int:
     t0 = time.monotonic()
     tests = json.loads((DATA / "tests.json").read_text("utf-8"))["tests"]
@@ -371,6 +465,12 @@ def main() -> int:
             results[cid] = full
             log(f"{cid}: ERROR {type(e).__name__}: {e} -> everything")
 
+    # Provisional answers for the supervisor: safe as soon as no import check is pending.
+    for p in patches:
+        a = analyses.get(p.stem)
+        if a is None or a.everything or not a.import_check:
+            send_answer("S", p.stem, results.get(p.stem, full))
+
     # Definition-time edits must leave their modules importable; otherwise every
     # importer fails, which the static rules cannot bound: select everything.
     # Commits that will be verified get their import check inside the
@@ -398,10 +498,14 @@ def main() -> int:
                 a.everything = True
                 results[cid] = full
 
-    out = sys.stdout
-    for p in patches:
-        out.write(json.dumps({"commit": p.stem, "workers": results.get(p.stem, full)}) + "\n")
-    out.flush()
+    if REPORT_FD is not None:
+        for p in patches:
+            send_answer("F", p.stem, results.get(p.stem, full))
+    else:
+        out = sys.stdout
+        for p in patches:
+            out.write(json.dumps({"commit": p.stem, "workers": results.get(p.stem, full)}) + "\n")
+        out.flush()
     total = sum(cost_of(results.get(p.stem, full), dur) for p in patches) / 1000
     log(f"done {n} commits in {time.monotonic() - t0:.2f}s; selected cost {total:.3f}s")
     return 0
@@ -483,6 +587,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             if a_import_errors := report.get("import_errors"):
                 analyses[cid].everything = True
                 results[cid] = full
+                send_answer("F", cid, full)
                 log(f"{cid}: patched import FAILED in verification {a_import_errors} -> everything")
                 continue
             analyses[cid].import_ok = True
@@ -507,6 +612,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                     and plan["drop_held_if_clean"]:
                 chosen |= {h for h in plan["held"] if tests_by_num[h]["id"] == TPCDS_ID}
             results[cid] = partition(chosen, dur)
+            send_answer("F", cid, results[cid])  # verified (imports checked in the child): final
             if plan.get("tpcds_subset") is not None:
                 log(f"{cid}: tpcds restricted to {len(plan['tpcds_subset'])} queries")
             if plan.get("entries"):
@@ -521,4 +627,4 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main() if os.environ.get("BR_UNSUPERVISED") == "1" else supervise())
