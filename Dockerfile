@@ -14,6 +14,11 @@ RUN pip install --no-cache-dir -q -r /app/requirements.lock
 # Bytecode for the reference tree: fresh imports in verification forks stay cheap.
 RUN python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests && chmod -R a+rX /opt/sqlglot
 
+# Build-time TPC store: parsed CSV rows + duckdb answers keyed by transpiled text.
+COPY selector/build_tpc_store.py /app/build_tpc_store.py
+RUN SKIP_INTEGRATION=0 PYTHONPATH=/opt/sqlglot python /app/build_tpc_store.py /opt/sqlglot /opt/tpcstore \
+ && chmod -R a+rX /opt/tpcstore
+
 COPY selector /app/selector
 COPY maps /app/maps
 RUN chmod -R a+rX /app && python -m compileall -q /app/selector

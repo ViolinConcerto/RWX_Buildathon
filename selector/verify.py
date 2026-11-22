@@ -127,6 +127,93 @@ class _OutcomePlugin:
             self.collect_errors.append(report.nodeid)
 
 
+TPC_STORE = os.environ.get("BR_TPC_STORE", "/opt/tpcstore")
+
+
+def tpc_store_usable(new_files) -> bool:
+    """The build-time store reflects the pinned TPC data and test harness only."""
+    if not os.path.exists(os.path.join(TPC_STORE, "rows.pkl")):
+        return False
+    for rel in new_files:
+        if rel in ("tests/test_executor.py", "tests/helpers.py", "tests/__init__.py") or \
+                rel.startswith("tests/fixtures/optimizer/tpc-"):
+            return False
+    return True
+
+
+class _StoredResult:
+    def __init__(self, blob):
+        self._blob = blob
+
+    def fetchdf(self):
+        return pickle.loads(self._blob)
+
+
+class _LazyTPCConn:
+    """duckdb connection that answers known queries from the build-time store and
+    only creates the CSV views (like TestExecutor.setUpClass) on a miss."""
+
+    def __init__(self, kind, directory, schema, answers):
+        self.kind, self.directory, self.schema, self.answers = kind, directory, schema, answers
+        self._conn = None
+
+    def _real(self):
+        if self._conn is None:
+            import duckdb
+
+            conn = duckdb.connect()
+            for table, columns in self.schema.items():
+                file_name = f"{self.directory}{table}.csv.gz"
+                conn.execute(
+                    f"""
+                CREATE VIEW {table} AS
+                SELECT *
+                FROM READ_CSV('{file_name}', delim='|', header=True, columns={columns})
+                """
+                )
+            self._conn = conn
+        return self._conn
+
+    def execute(self, query, *args, **kwargs):
+        if not args and not kwargs:
+            blob = self.answers().get((self.kind, query))
+            if blob is not None:
+                return _StoredResult(blob)
+        return self._real().execute(query, *args, **kwargs)
+
+    def close(self):
+        if self._conn is not None:
+            self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._real(), name)
+
+
+def _install_tpc_store() -> None:
+    te = importlib.import_module("tests.test_executor")
+    cls = te.TestExecutor
+    loaded: dict = {}
+
+    def answers():
+        if "answers" not in loaded:
+            with open(os.path.join(TPC_STORE, "answers.pkl"), "rb") as f:
+                loaded["answers"] = pickle.load(f)
+        return loaded["answers"]
+
+    def setUpClass(klass):
+        with open(os.path.join(TPC_STORE, "rows.pkl"), "rb") as f:
+            rows = pickle.load(f)
+        klass.tpch_conn = _LazyTPCConn("tpch", te.DIR_TPCH, te.TPCH_SCHEMA, answers)
+        klass.tpcds_conn = _LazyTPCConn("tpcds", te.DIR_TPCDS, te.TPCDS_SCHEMA, answers)
+        klass.tpch_tables = {t: te.Table(columns=c, rows=rows["tpch"][t]) for t, c in te.TPCH_SCHEMA.items()}
+        klass.tpcds_tables = {t: te.Table(columns=c, rows=rows["tpcds"][t]) for t, c in te.TPCDS_SCHEMA.items()}
+        klass.cache = {}
+        klass.tpch_sqls = list(te.load_sql_fixture_pairs("optimizer/tpc-h/tpc-h.sql"))
+        klass.tpcds_sqls = list(te.load_sql_fixture_pairs("optimizer/tpc-ds/tpc-ds.sql"))
+
+    cls.setUpClass = classmethod(setUpClass)
+
+
 def _install_tpcds_subset(indices: list[int]) -> None:
     """Restrict test_execute_tpcds to the given fixture queries.
 
@@ -213,6 +300,12 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             importlib.import_module(mod)
         except BaseException as e:  # noqa: BLE001
             import_errors[mod] = f"{type(e).__name__}: {e}"[:300]
+    if not import_errors and any(n.startswith("tests/test_executor.py::") for n in nodeids) \
+            and tpc_store_usable(new_files):
+        try:
+            _install_tpc_store()
+        except BaseException as e:  # noqa: BLE001
+            import_errors["tests.test_executor"] = f"{type(e).__name__}: {e}"[:300]
     if not import_errors and tpcds_indices is not None:
         try:
             _install_tpcds_subset(tpcds_indices)

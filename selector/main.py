@@ -54,7 +54,7 @@ BASE_OVERHEAD = 0.13    # fork + fresh patched sqlglot import (measured 0.113 s)
 PER_FILE_OVERHEAD = 0.03
 # Class-fixture CPU paid once per verification that runs any test of the file
 # (measured: an executor test costs 2.0 s because setUpClass loads TPC-H/TPC-DS).
-FILE_SETUP_CPU = {"tests/test_executor.py": 1.9, "tests/test_optimizer.py": 0.1}
+FILE_SETUP_CPU = {"tests/test_executor.py": 0.3, "tests/test_optimizer.py": 0.1}  # with the TPC store
 MIN_GAIN = 0.15  # skip coin-flip verifications whose expected gain is within noise
 TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
 MAX_NODES_ID = "tests/test_parser.py::TestParser::test_max_nodes"
@@ -188,7 +188,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     blind = cost_of(partition(cands, dur), dur) / 1000
     tpcds_num = next((n for n in cands if tests_by_num[n]["id"] == TPCDS_ID), None)
     subset = tpcds_subset(a) if tpcds_num is not None else None
-    subset_cpu = (1.15 * sum(QMAP["suites"]["tpcds"]["cpu"][i] for i in subset)) if subset is not None else None
+    subset_cpu = (0.9 * sum(QMAP["suites"]["tpcds"]["cpu"][i] for i in subset)) if subset is not None else None
 
     # Tests too expensive to re-run here: kept or dropped by rule, never executed.
     held = []
@@ -247,7 +247,8 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
         # Rule A1: held tests are selected only if some runnable candidate fails.
         # Stop at the first failure: the rest are then selected unrun (they ride
         # along under the held test's load).
-        cpu_eff = (1 - p) * cpu + p * min(cpu, 0.3 * cpu + 0.5)
+        fixed = BASE_OVERHEAD + sum(file_setup(f) for f in files)
+        cpu_eff = (1 - p) * cpu + p * min(cpu, fixed + 0.3 * (cpu - fixed) + 0.2)
         expected = cpu_eff + p * blind
         plan.update(stop_on_fail=True, drop_held_if_clean=True, gain=blind - expected, cpu=cpu)
         return plan if plan["gain"] >= MIN_GAIN else None
