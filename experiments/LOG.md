@@ -93,3 +93,32 @@ narrowed 8 (231 -> 2, 104 -> 29), 0 misses. Official-flag runs: o1 538.1, o2 193
 Decisions: optimizer per-fixture-entry partial verification parked (sample upside ~2.5 s once
 4d63 is excluded; m1 bulk is executor hot paths). Fixture-comment equivalence parked (some
 tests read raw text). Entry-level dict dependencies parked (metaclasses derive structures).
+
+## r17 – r26 (practice board, official scorer)
+
+| version | change | practice |
+| --- | --- | --- |
+| r16 | predicate-sensitivity narrowing | 176.3 s, 0 missed |
+| r22 | supervisor always prints an answer for every commit (+ r17 A1, r19 TPC store, r20 max_nodes stand-in, r21 longest-candidates plan) | 174.4 s, 0 missed |
+| r24 | import-state diff + per-test attribute reads for definition edits | 175.1 s, 0 missed (state diff on every definition commit: +CPU) |
+| r25 | state diff only when definition rules add >= 3 s | 174.5 s (163.708 sim + 10.8 CPU), 0 missed |
+| r26 3f9163b | conditional two-stage tpcds check (only when A1 would keep tpcds blindly); lazy executor sub-cases; fixture-filter leak fix | pending |
+
+Class probes on r25 (measurement only, never final; class cost = r25 sim + 300 x misses - probe sim):
+
+| probe | emptied / dropped | probe sim | misses | class cost | breaking |
+| --- | --- | --- | --- | --- | --- |
+| P2 | heavy + everything classes emptied | 988.607 | 3 | 75.1 s | 3 |
+| P3 | blind_code class emptied | 1033.81 | 3 | 29.9 s | 3 |
+| P5 576799a | tpcds dropped from heavy-class answers | 406.895 (CPU 11.6) | 1 | 56.8 s | 1 |
+
+P5 => ~3 non-everything commits carry tpcds, 1 needs it: ~35-40 s recoverable. r25's A1 already drops
+held tpcds when every cheaper candidate passes, so the waste is where a cheaper candidate fails.
+Labeled sets: 19 such commits, tpcds truly fails in 11.
+Blanket verification of blind non-heavy commits (g1/g2 analysis): net negative (CPU > saved sim).
+
+r26 development notes: first draft missed o019 on o1 — the fixture-entry filter of the previous test
+leaked into TestExecutor.setUpClass and restricted tpcds_sqls (latent in r25 too, never triggered
+because tpcds was held there). Fixed in stopTest. Forced-check measurement (BR_COND_FORCE=1):
+o017 25.45 -> 4.90 s for 1.7 s CPU (55 plans re-made, 0 changed); o026 25.45 -> 7.34 s for 16.8 s CPU;
+o013 / o019 tpcds really fail (0.45 s / 5.9 s). Stage-1 cost model recalibrated in r27.
