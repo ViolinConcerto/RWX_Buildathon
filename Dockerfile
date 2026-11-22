@@ -19,6 +19,10 @@ COPY selector/build_tpc_store.py /app/build_tpc_store.py
 RUN SKIP_INTEGRATION=0 PYTHONPATH=/opt/sqlglot python /app/build_tpc_store.py /opt/sqlglot /opt/tpcstore \
  && chmod -R a+rX /opt/tpcstore
 
+# Import-state fingerprint of the pinned commit (what definition-time edits are compared against).
+COPY selector/statefp.py /app/statefp_build.py
+RUN PYTHONPATH=/opt/sqlglot python /app/statefp_build.py /opt/sqlglot /opt/statefp.json && chmod a+r /opt/statefp.json
+
 COPY selector /app/selector
 COPY maps /app/maps
 RUN chmod -R a+rX /app && python -m compileall -q /app/selector

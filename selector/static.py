@@ -36,6 +36,12 @@ class Analysis:
     # (definition-time, data, test code, fallbacks) contributed candidates.
     runtime_lines: dict[str, set[int]] = field(default_factory=dict)
     other_facts: bool = False
+    # Candidates contributed by definition-time rules, kept apart so that an
+    # import-state diff (selector/statefp.py) can replace them with a precise set.
+    def_candidates: set[int] = field(default_factory=set)
+    def_everything: bool = False
+    base_candidates: set[int] = field(default_factory=set)
+    base_everything: bool = False
 
 
 class DepMap:
@@ -59,6 +65,19 @@ class DepMap:
         self.module_refs = raw.get("module_refs", {})
         # Code objects (rel, co_qualname, co_firstlineno) that ran while importing
         # every sqlglot module (tools/mapgen/import_closure.py); None if unavailable.
+        # Which tests read which class attribute binding (tools/mapgen/attr_read_plugin.py).
+        self.attr_tracked: set[str] = set()
+        self.attr_reads: dict[str, int] = {}
+        self.attr_sets: list = []
+        self.attr_remap: list = []
+        attr_path = os.path.join(os.path.dirname(path), "attrreads.json.gz")
+        if os.path.exists(attr_path):
+            with gzip.open(attr_path, "rt", encoding="utf-8") as f:
+                ar = json.load(f)
+            self.attr_tracked = set(ar["tracked"])
+            self.attr_reads = ar["reads"]
+            self.attr_sets = ar["sets"]
+            self.attr_remap = [id2num.get(i) for i in ar["tests"]]
         self.import_called = None
         called = os.path.join(os.path.dirname(path), "import_called.json")
         if os.path.exists(called):
@@ -73,6 +92,15 @@ class DepMap:
             got = frozenset(self.remap[i] for i in self.sets[sid] if self.remap[i] is not None)
             self._set_cache[sid] = got
         return got
+
+    def attr_readers(self, binding: str) -> set[int] | None:
+        """Tests that read this class attribute binding; None if reads of it were not recorded."""
+        if binding not in self.attr_tracked:
+            return None
+        sid = self.attr_reads.get(binding)
+        if sid is None:
+            return set()
+        return {self.attr_remap[i] for i in self.attr_sets[sid] if self.attr_remap[i] is not None}
 
     def line_tests(self, rel: str, lines) -> set[int]:
         m = self.lines.get(rel, {})
@@ -148,11 +176,61 @@ class StaticSelector:
             except Exception as e:  # noqa: BLE001
                 a.everything = True
                 a.reasons.append(f"{ch.path}: {type(e).__name__}: {e}")
+        # Conservative static answer = everything else + definition-rule candidates.
+        a.base_candidates, a.base_everything = set(a.candidates), a.everything
+        a.candidates |= a.def_candidates
+        a.everything = a.everything or a.def_everything
         if a.everything:
             a.candidates = set(self.all)
-        else:
-            a.candidates |= self.map.unmapped & a.candidates  # no-op, keeps type
         return a
+
+    def _deferred(self, a: Analysis, fn) -> None:
+        """Run a definition-time rule, recording what it adds separately."""
+        before, ev = set(a.candidates), a.everything
+        fn()
+        a.def_candidates |= a.candidates - before
+        a.candidates = before
+        if a.everything and not ev:
+            a.def_everything = True
+            a.everything = ev
+
+    # ------------------------------------------------------------------
+    def class_users_wide(self, key: str, owners: dict) -> set[int]:
+        """Tests that created an instance of the class, a subclass, or a dialect owning either."""
+        keys = {key, *self.map.subclasses.get(key, ())}
+        out: set[int] = set()
+        for k in keys:
+            out |= self.map.tests_of(self.map.classes.get(k))
+            for d in owners.get(k, ()):
+                out |= self.map.class_users(d)
+        return out
+
+    def refine_definitions(self, changed: list, static_def: set[int], static_everything: bool):
+        """Candidates for the import-state bindings whose value changed under the patch.
+
+        changed: [[binding path, "data"|"code"|"removed"], ...] from statefp.diff().
+        A data attribute of a class whose reads were recorded per test on the pinned
+        commit (maps/attrreads.json.gz) is observable exactly by the tests that read it:
+        any other test runs as before. Every other kind of binding (functions, module
+        globals, attributes added by the patch) keeps the static definition rules.
+        Returns (tests, reasons) or (None, reason) when the static answer must stand.
+        """
+        out: set[int] = set()
+        reasons = []
+        need_static = False
+        for path, kind in changed:
+            exact = self.map.attr_readers(path) if ("::" not in path and kind in ("data", "removed")) else None
+            if exact is None:
+                need_static = True
+                reasons.append(f"{path} [{kind}] -> static rule")
+            else:
+                out |= exact
+                reasons.append(f"{path} -> {len(exact)} readers")
+        if need_static:
+            if static_everything:
+                return None, "; ".join(reasons)[:200]
+            out |= static_def
+        return out, reasons
 
     def _read_old(self, rel: str) -> bytes | None:
         try:
@@ -273,19 +351,23 @@ class StaticSelector:
                     names = self._enclosing_functions(old, fact.lines)
                     a.reasons.append(f"{rel}:{min(fact.lines)} import-time code in {sorted(names)}")
                     a.import_check.add(mod)
-                    self._definition(mod, rel, (), names, a, via_import=True)
+                    self._deferred(a, lambda names=names: self._definition(mod, rel, (), names, a, via_import=True))
                 else:
                     a.reasons.append(f"{rel}:{min(fact.lines)} runtime[{fact.note}] -> {len(tests)}")
             elif isinstance(fact, ClassHeader):
                 a.import_check.add(mod)
                 a.other_facts = True
                 key = f"{mod}:{'.'.join(fact.scope)}"
-                users = self.map.class_users(key)
-                a.candidates |= users
-                a.reasons.append(f"{rel} class header {key} -> {len(users)}")
-                self._definition(mod, rel, fact.scope[:-1], {fact.scope[-1]}, a)
+
+                def header(key=key, fact=fact):
+                    users = self.map.class_users(key)
+                    a.candidates |= users
+                    a.reasons.append(f"{rel} class header {key} -> {len(users)}")
+                    self._definition(mod, rel, fact.scope[:-1], {fact.scope[-1]}, a)
+
+                self._deferred(a, header)
             elif isinstance(fact, Definition):
-                self._definition(mod, rel, fact.scope, fact.names, a)
+                self._deferred(a, lambda fact=fact: self._definition(mod, rel, fact.scope, fact.names, a))
 
     def _old_tree(self, src: bytes):
         cache = getattr(self, "_tree_cache", None)

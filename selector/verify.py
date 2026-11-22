@@ -744,3 +744,60 @@ def import_check(src_root: str, new_files, modules, timeout_s: float = 20.0) -> 
     job = Job("import", pid, rfd, time.monotonic() + timeout_s, [])
     (_, report), = collect([job])
     return report
+
+
+STATEFP = os.environ.get("BR_STATEFP", "/opt/statefp.json")
+
+
+def _statediff_child(src_root: str, new_files, wfd: int) -> None:
+    import gc
+
+    gc.freeze()
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    sys.dont_write_bytecode = True
+    os.environ["SKIP_INTEGRATION"] = "0"
+    patched: dict[str, tuple[str, bytes]] = {}
+    for rel, content in new_files.items():
+        mod = _module_name(rel)
+        if content is not None and mod and rel.startswith("sqlglot/"):
+            patched[mod] = (os.path.join(src_root, rel), content)
+    if patched:
+        sys.meta_path.insert(0, _PatchedFinder(patched))
+    sys.path.insert(0, src_root)
+    os.chdir(src_root)
+    import statefp
+
+    try:
+        errors = statefp.import_all(src_root)
+    except BaseException as e:  # noqa: BLE001  (sqlglot itself failed to import)
+        errors = {"sqlglot": f"{type(e).__name__}: {e}"[:200]}
+    report = {"ok": True, "errors": errors}
+    if not errors:
+        with open(STATEFP) as f:
+            base = json.load(f)
+        report["changed"] = statefp.diff(base)
+    data = json.dumps(report).encode()
+    view = memoryview(data)
+    while view:
+        view = view[os.write(wfd, view):]
+    os.close(wfd)
+
+
+def start_statediff(key, src_root: str, new_files, timeout_s: float = 25.0) -> Job:
+    """Import the whole patched sqlglot in a fork and report which import-state bindings changed."""
+    rfd, wfd = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        code = 0
+        try:
+            os.close(rfd)
+            _statediff_child(src_root, new_files, wfd)
+        except BaseException:  # noqa: BLE001
+            code = 1
+        finally:
+            os._exit(code)
+    os.close(wfd)
+    return Job(key, pid, rfd, time.monotonic() + timeout_s, [])

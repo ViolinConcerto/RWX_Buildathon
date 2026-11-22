@@ -64,7 +64,10 @@ TPCDS_RUN_LIMIT = 8.0   # CPU seconds of affected TPC-DS queries we are willing 
 # selected only when a cheaper candidate fails. On 255 labeled patches, tpcds
 # failed 14 times and never without a sub-second test failing too.
 RULE_A1 = os.environ.get("BR_A1", "1") == "1"
+STATEDIFF = os.environ.get("BR_STATEDIFF", "1") == "1"
+STATEFP_PATH = os.environ.get("BR_STATEFP", "/opt/statefp.json")
 FORCE = os.environ.get("BR_FORCE", "0") == "1"  # measurement probes: verify everything runnable
+EXACT = os.environ.get("BR_EXACT", "0") == "1"  # offline only: also run tpcds / max_nodes for real
 # test_max_nodes' scaled stand-in (statistical, not a proof): 1/25 of the width and of
 # the node limits, same nesting depth; fails/raises/times out or runs >3x slower than
 # on the pinned commit => max_nodes is selected. BR_MAXNODES_PROXY=0 disables it.
@@ -200,6 +203,8 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     held = []
     for n in cands:
         tid = tests_by_num[n]["id"]
+        if EXACT:
+            continue  # offline analysis: really run everything, however expensive
         if tid == MAX_NODES_ID or (tid == TPCDS_ID and (subset_cpu is None or subset_cpu > TPCDS_RUN_LIMIT)):
             held.append(n)
     run = [n for n in cands if n not in held]
@@ -221,7 +226,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
 
     def test_cpu(n):
         if n == tpcds_num:
-            return subset_cpu + PER_TEST_CPU
+            return (subset_cpu if subset_cpu is not None else 36.0) + PER_TEST_CPU
         if n in entry_cpu:
             return entry_cpu[n] + PER_TEST_CPU
         tid = tests_by_num[n]["id"]
@@ -465,6 +470,14 @@ def main() -> int:
             results[cid] = full
             log(f"{cid}: ERROR {type(e).__name__}: {e} -> everything")
 
+    # Definition-time edits: ask a fork which import-state bindings really changed and
+    # replace the broad definition-rule candidates with users-and-readers of those.
+    if STATEDIFF and selector is not None and os.path.exists(STATEFP_PATH):
+        try:
+            refine_all(selector, analyses, results, full, dur)
+        except Exception as e:  # noqa: BLE001
+            log(f"state diff aborted: {type(e).__name__}: {e}")
+
     # Provisional answers for the supervisor: safe as soon as no import check is pending.
     for p in patches:
         a = analyses.get(p.stem)
@@ -511,6 +524,44 @@ def main() -> int:
     return 0
 
 
+def refine_all(selector, analyses, results, full, dur) -> None:
+    import verify
+
+    todo = [cid for cid, a in analyses.items() if a.import_check and not a.base_everything]
+    jobs: list = []
+    while todo or jobs:
+        while todo and len(jobs) < PARALLEL:
+            cid = todo.pop(0)
+            jobs.append(verify.start_statediff(cid, SRC, analyses[cid].new_files))
+        for job, report in verify.collect(jobs):
+            cid, a = job.key, analyses[job.key]
+            if not report or not report.get("ok"):
+                log(f"{cid}: state diff failed -> keeping static candidates")
+                continue
+            if report["errors"]:
+                a.everything = True
+                a.import_ok = True
+                results[cid] = full
+                log(f"{cid}: patched import FAILED {report['errors']} -> everything")
+                continue
+            a.import_ok = True  # every module imported under the patch
+            refined, why = selector.refine_definitions(report["changed"], a.def_candidates, a.def_everything)
+            if refined is None:
+                log(f"{cid}: state diff not boundable ({why}) -> keeping static candidates")
+                continue
+            before = len(a.candidates) if not a.everything else len(full_set(full))
+            a.candidates = set(a.base_candidates) | refined
+            a.everything = False
+            a.statediff = report["changed"]
+            results[cid] = partition(a.candidates, dur)
+            log(f"{cid}: state diff {len(report['changed'])} bindings changed; candidates {before} -> "
+                f"{len(a.candidates)} | " + " ; ".join(why)[:260])
+
+
+def full_set(full):
+    return {x for w in full for x in w}
+
+
 def check_imports(analyses, results, full, t0) -> None:
     import verify
 
@@ -547,7 +598,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
     # 4.5 min for the final (~60). Stay well inside: ~1.6 s of wall per commit.
     # Hard limits: 180 s (practice, ~40 commits) / 270 s (final, ~60) for the batch;
     # static analysis takes a few seconds, two children run in parallel.
-    budget_end = t0 + min(150.0, max(30.0, 3.0 * n))
+    budget_end = t0 + float(os.environ.get("BR_BUDGET", min(150.0, max(30.0, 3.0 * n))))
     tv = time.monotonic()
     heavy_users = sum(1 for _, _, plan in plans
                       if any(tests_by_num[x]["file"] == "tests/test_optimizer.py" for x in plan["cands"]))
