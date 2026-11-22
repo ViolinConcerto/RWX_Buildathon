@@ -133,6 +133,21 @@ def _targets(node) -> set[str]:
     return names
 
 
+def _is_docstring(node) -> bool:
+    return isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+
+
+def _def_names(node) -> set[str] | None:
+    """Names a module/class-level statement binds; None for a no-op (pass / ...)."""
+    if isinstance(node, ast.Pass) or (
+        isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and node.value.value is Ellipsis
+    ):
+        return None
+    if _is_docstring(node):
+        return {"__doc__"}
+    return _targets(node)
+
+
 def _expr_diffs(old, new, in_lambda: bool, out: list) -> None:
     """Collect (old_node, inside_lambda_body) for minimal differing subtrees."""
     if type(old) is not type(new):
@@ -181,7 +196,10 @@ class _Differ:
             self.facts.append(Definition(scope, {node.name}, "def"))
             return
         # Compound statements at module/class level (if/try/for at import time):
-        self.facts.append(Definition(scope, _targets(node), note or type(node).__name__))
+        names = _def_names(node)
+        if names is None:
+            return
+        self.facts.append(Definition(scope, names, note or type(node).__name__))
         for n in ast.walk(node):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not node:
                 self.facts.append(Runtime(set(range(n.body[0].lineno, (n.end_lineno or n.lineno) + 1)), "callers"))
@@ -194,7 +212,9 @@ class _Differ:
                     lines |= _header_span(a) if _is_compound(a) else _span(a)
             self.facts.append(Runtime(lines, "insert"))
             return
-        self.facts.append(Definition(scope, _targets(new_node), "insert"))
+        names = _def_names(new_node)
+        if names is not None:
+            self.facts.append(Definition(scope, names, "insert"))
 
     # -- recursive diff --------------------------------------------------------
     def block(self, old_list, new_list, scope, in_func, parent=None) -> None:
@@ -235,7 +255,9 @@ class _Differ:
         if type(o) is not type(n):
             self.changed_whole(o, scope, in_func)
             if not in_func:
-                self.facts.append(Definition(scope, _targets(n), "retype"))
+                names = _def_names(n)
+                if names:
+                    self.facts.append(Definition(scope, names, "retype"))
             return
         if isinstance(o, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if _without_bodies(o) != _without_bodies(n):
@@ -301,6 +323,9 @@ class _Differ:
             for node, _ in diffs:
                 lines |= _span(node)
             self.facts.append(Runtime(lines, "lambda-body"))
+            return
+        if _is_docstring(o) and _is_docstring(n):
+            self.facts.append(Definition(scope, {"__doc__"}, "docstring"))
             return
         self.facts.append(Definition(scope, _targets(o) | _targets(n), _keys_note(diffs)))
 

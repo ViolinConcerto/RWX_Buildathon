@@ -260,3 +260,51 @@ def collect(jobs: list[Job], poll: float = 0.05) -> list[tuple[Job, dict | None]
     for j, _ in done:
         jobs.remove(j)
     return done
+
+
+def _import_child(src_root: str, new_files, modules: list[str], wfd: int) -> None:
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    sys.dont_write_bytecode = True
+    os.environ["SKIP_INTEGRATION"] = "0"
+    patched: dict[str, tuple[str, bytes]] = {}
+    for rel, content in new_files.items():
+        mod = _module_name(rel)
+        if content is not None and mod and rel.startswith("sqlglot/"):
+            patched[mod] = (os.path.join(src_root, rel), content)
+    if patched:
+        sys.meta_path.insert(0, _PatchedFinder(patched))
+    sys.path.insert(0, src_root)
+    os.chdir(src_root)
+    errors = {}
+    for mod in modules:
+        try:
+            importlib.import_module(mod)
+        except BaseException as e:  # noqa: BLE001
+            errors[mod] = f"{type(e).__name__}: {e}"[:300]
+    data = json.dumps({"ok": True, "errors": errors}).encode()
+    view = memoryview(data)
+    while view:
+        view = view[os.write(wfd, view):]
+    os.close(wfd)
+
+
+def import_check(src_root: str, new_files, modules, timeout_s: float = 20.0) -> dict | None:
+    """Import the patched modules in a fork. Returns {"errors": {mod: msg}} or None on crash/timeout."""
+    rfd, wfd = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        code = 0
+        try:
+            os.close(rfd)
+            _import_child(src_root, new_files, sorted(modules), wfd)
+        except BaseException:  # noqa: BLE001
+            code = 1
+        finally:
+            os._exit(code)
+    os.close(wfd)
+    job = Job("import", pid, rfd, time.monotonic() + timeout_s, [])
+    (_, report), = collect([job])
+    return report

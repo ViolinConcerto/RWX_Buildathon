@@ -53,6 +53,47 @@ def classify_lines(source: str) -> tuple[set[int], dict[int, set[str]]]:
     return runtime, idents
 
 
+def statement_bindings(stmt) -> set[str]:
+    """Module-level names a statement binds (not comprehension/lambda locals)."""
+    out: set[str] = set()
+
+    def target(t):
+        if isinstance(t, ast.Name):
+            out.add(t.id)
+        elif isinstance(t, (ast.Tuple, ast.List)):
+            for e in t.elts:
+                target(e)
+        elif isinstance(t, ast.Starred):
+            target(t.value)
+
+    if isinstance(stmt, ast.Assign):
+        for t in stmt.targets:
+            target(t)
+    elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        target(stmt.target)
+    elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+        target(stmt.target)
+        for b in stmt.body + stmt.orelse:
+            out |= statement_bindings(b)
+    elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+        for it in stmt.items:
+            if it.optional_vars is not None:
+                target(it.optional_vars)
+        for b in stmt.body:
+            out |= statement_bindings(b)
+    elif isinstance(stmt, (ast.If, ast.While)):
+        for b in stmt.body + stmt.orelse:
+            out |= statement_bindings(b)
+    elif isinstance(stmt, ast.Try):
+        for b in stmt.body + stmt.orelse + stmt.finalbody + [x for h in stmt.handlers for x in h.body]:
+            out |= statement_bindings(b)
+    elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        out.add(stmt.name)
+    elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+        out.update((a.asname or a.name).split(".")[0] for a in stmt.names)
+    return out
+
+
 def deftime_refs(source: str, module: str):
     """Identifiers mentioned by definition-time code (class bodies / module level,
     outside function bodies, lambda bodies excluded).
@@ -106,14 +147,7 @@ def deftime_refs(source: str, module: str):
                 for i in ids:
                     class_refs[i].add(key)
             else:
-                bound = set()
-                for n in ast.walk(stmt) if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) else [stmt]:
-                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
-                        bound.add(n.id)
-                    elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                        bound.add(n.name)
-                    elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                        bound.update((a.asname or a.name).split(".")[0] for a in n.names)
+                bound = statement_bindings(stmt)
                 for i in ids:
                     for b in bound:
                         if b != i:
@@ -185,7 +219,7 @@ def main() -> None:
                 any_lines[rel].add(line)
                 for ctx in contexts:
                     kind, nums = expand(ctx)
-                    if kind in ("global", "collect"):
+                    if kind == "global":
                         import_lines[rel].add(line)
                     if kind == "collect" and line not in runtime:
                         continue  # import-time execution of module/class bodies
@@ -204,18 +238,30 @@ def main() -> None:
             for name in names:
                 classes[name].update(nums)
 
+    # Lines executed while importing every sqlglot module, independent of
+    # which test happened to trigger a lazy import (tools/mapgen/import_closure.py).
+    closure_path = os.environ.get("IMPORT_CLOSURE")
+    if closure_path:
+        for rel, lines in json.load(open(closure_path)).items():
+            import_lines[rel].update(lines)
+
     # Identifier -> tests that ran a runtime line mentioning it; and whether it
-    # is mentioned on a line run at import time (metaclass / class-creation code).
+    # is mentioned on a function-body line run at import time (metaclasses,
+    # class-creation helpers), i.e. read while classes are being built.
     ident_tests: dict[str, set[int]] = defaultdict(set)
     ident_import: set[str] = set()
+    for rel, lines in import_lines.items():
+        if rel.startswith("sqlglot/"):
+            runtime, idents = runtime_info(rel)
+            for line in lines:
+                if line in runtime:
+                    ident_import.update(idents.get(line, ()))
     for rel, lines in any_lines.items():
         if not rel.startswith("sqlglot/"):
             continue
         runtime, idents = runtime_info(rel)
         for line in lines:
             names = idents.get(line, ())
-            if line in import_lines[rel] and line in runtime:
-                ident_import.update(names)
             tl = line_tests[rel].get(line)
             if tl and line in runtime:
                 for name in names:

@@ -27,6 +27,9 @@ class Analysis:
     new_files: dict[str, bytes | None] = field(default_factory=dict)  # path -> patched content (None = deleted)
     python_changed: bool = False  # sqlglot/ or tests/ python changed (needs fresh import to verify)
     syntax_error: bool = False
+    # Modules whose definition-time code changed: the caller must check they
+    # still import (a removed name, a failing metaclass... breaks every importer).
+    import_check: set[str] = field(default_factory=set)
 
 
 class DepMap:
@@ -209,6 +212,12 @@ class StaticSelector:
             return
         mod = module_name(rel)
         imp = self.map.import_lines.get(rel, set())
+        if not imp and rel not in self.map.executed_lines:
+            # Never imported anywhere in the suite (e.g. __main__): only
+            # file-as-data readers (already added) can observe it.
+            a.reasons.append(f"{rel}: module never imported by the suite")
+            return
+        self._old_src = old
         for fact in res.facts:
             if isinstance(fact, Broad):
                 a.everything = True
@@ -221,10 +230,12 @@ class StaticSelector:
                     # Code that runs at import time (class creation helpers, metaclasses).
                     names = self._enclosing_functions(old, fact.lines)
                     a.reasons.append(f"{rel}:{min(fact.lines)} import-time code in {sorted(names)}")
+                    a.import_check.add(mod)
                     self._definition(mod, rel, (), names, a, via_import=True)
                 else:
                     a.reasons.append(f"{rel}:{min(fact.lines)} runtime[{fact.note}] -> {len(tests)}")
             elif isinstance(fact, ClassHeader):
+                a.import_check.add(mod)
                 key = f"{mod}:{'.'.join(fact.scope)}"
                 users = self.map.class_users(key)
                 a.candidates |= users
@@ -244,6 +255,7 @@ class StaticSelector:
 
     def _definition(self, mod: str, rel: str, scope, names: set[str], a: Analysis, via_import=False, depth=0) -> None:
         """A binding changed at definition time. Find who can observe it."""
+        a.import_check.add(mod)
         names = {n for n in names if n}
         if not names:
             a.everything = True
@@ -299,12 +311,36 @@ class StaticSelector:
             derived -= names
             if derived and depth < 3:
                 self._definition(mod, rel, (), derived, a, via_import, depth + 1)
+            # Module-level functions/classes whose definition-time code (defaults,
+            # decorators, bases) mentions a changed name: their executors observe it.
+            spans = self._def_spans(rel)
+            for b in derived | names:
+                for lo, hi in spans.get(b, ()):
+                    cand |= self.map.line_tests(rel, range(lo, hi + 1))
             if import_read and not users:
                 a.everything = True
                 a.reasons.append(f"{mod}.{sorted(names)}: read at import, no class users")
                 return
             a.reasons.append(f"{mod}.{sorted(names)} module-level -> {len(cand)} (derived {sorted(derived)[:5]})")
         a.candidates |= cand
+
+    def _def_spans(self, rel: str) -> dict[str, list[tuple[int, int]]]:
+        """Module-level def/class name -> body line spans in the pinned source."""
+        cache = getattr(self, "_span_cache", None)
+        if cache is None:
+            cache = self._span_cache = {}
+        if rel not in cache:
+            out: dict[str, list[tuple[int, int]]] = {}
+            src = self._read_old(rel)
+            try:
+                tree = ast.parse(src) if src is not None else None
+            except SyntaxError:
+                tree = None
+            for node in (tree.body if tree else []):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    out.setdefault(node.name, []).append((node.body[0].lineno, node.end_lineno or node.lineno))
+            cache[rel] = out
+        return cache[rel]
 
     def _related(self, key: str, defining: str) -> bool:
         """Does class `key`'s body mention the defining class by name?"""

@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 DATA = Path(os.environ.get("BR_DATA", "/data"))
-SRC = os.environ.get("BR_SRC", "/opt/sqlglot")
+SRC = os.path.abspath(os.environ.get("BR_SRC", "/opt/sqlglot"))
 MAP = os.environ.get("BR_MAP", str(HERE.parent / "maps" / "depmap.json.gz"))
 TMP = os.environ.get("BR_TMP", "/tmp/br")
 VERIFY = os.environ.get("BR_VERIFY", "1") == "1"
@@ -148,8 +148,19 @@ def main() -> int:
             results[cid] = full
             log(f"{cid}: ERROR {type(e).__name__}: {e} -> everything")
 
-    # Write the static answers first? No: stdout must hold exactly one line per
-    # commit, so answers are printed once, at the end. Verification only refines.
+    # Definition-time edits must leave their modules importable; otherwise every
+    # importer fails, which the static rules cannot bound: select everything.
+    try:
+        check_imports(analyses, results, full, t0)
+    except Exception as e:  # noqa: BLE001
+        log(f"import checks aborted: {type(e).__name__}: {e}; marking unchecked commits as everything")
+        for cid, a in analyses.items():
+            if a.import_check and not getattr(a, "import_ok", False):
+                a.everything = True
+                results[cid] = full
+
+    # stdout must hold exactly one line per commit, so answers are printed once,
+    # at the end. Verification only refines them.
     if VERIFY and analyses:
         try:
             verify_all(analyses, results, tests_by_num, dur, n, t0)
@@ -163,6 +174,23 @@ def main() -> int:
     total = sum(cost_of(results.get(p.stem, full), dur) for p in patches) / 1000
     log(f"done {n} commits in {time.monotonic() - t0:.2f}s; selected cost {total:.3f}s")
     return 0
+
+
+def check_imports(analyses, results, full, t0) -> None:
+    import verify
+
+    for cid, a in analyses.items():
+        if a.everything or not a.import_check:
+            continue
+        tc = time.monotonic()
+        report = verify.import_check(SRC, a.new_files, a.import_check)
+        if report is None or report.get("errors"):
+            a.everything = True
+            results[cid] = full
+            log(f"{cid}: patched import FAILED {report and report.get('errors')} -> everything")
+        else:
+            a.import_ok = True
+            log(f"{cid}: patched modules import ok ({time.monotonic() - tc:.2f}s): {sorted(a.import_check)}")
 
 
 def verify_all(analyses, results, tests_by_num, dur, n, t0) -> None:
