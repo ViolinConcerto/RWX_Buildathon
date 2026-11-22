@@ -18,5 +18,5 @@ COPY selector /app/selector
 COPY maps /app/maps
 RUN chmod -R a+rX /app && python -m compileall -q /app/selector
 
-ENV BR_SRC=/opt/sqlglot PYTHONDONTWRITEBYTECODE=1
+ENV BR_SRC=/opt/sqlglot PYTHONDONTWRITEBYTECODE=1 BR_FORCE=1 BR_A1=0
 CMD ["python", "/app/selector/main.py"]
