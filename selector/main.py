@@ -287,7 +287,36 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     if FORCE:
         plan["gain"] = max(plan["gain"], 1.0)
         return plan
-    return plan if plan["gain"] >= MIN_GAIN else None
+    long_plan = longest_plan(a, cands, run, tests_by_num, dur, test_cpu, file_setup, p, blind, entry_plan, subset,
+                             tpcds_num)
+    best = max((x for x in (plan, long_plan) if x is not None), key=lambda x: x["gain"])
+    return best if best["gain"] >= MIN_GAIN else None
+
+
+def longest_plan(a, cands, run, tests_by_num, dur, test_cpu, file_setup, p, blind, entry_plan, subset, tpcds_num):
+    """Verify only the longest candidates; select the rest unrun.
+
+    The busiest worker is set by the long tests; small ones share other workers.
+    Long = recorded >= 5 s first, then >= 1 s, at most 12.
+    """
+    ranked = sorted(run, key=lambda n: -dur[n])
+    longs = [n for n in ranked if dur[n] >= 5000] or []
+    longs += [n for n in ranked if 1000 <= dur[n] < 5000]
+    longs = longs[:12]
+    if not longs or len(longs) == len(run):
+        return None
+    rest = [n for n in cands if n not in longs]
+    cost_rest = cost_of(partition(rest, dur), dur) / 1000
+    files = {tests_by_num[n]["file"] for n in longs}
+    cpu = BASE_OVERHEAD + PER_FILE_OVERHEAD * len(files) + sum(file_setup(f) for f in files) + sum(
+        test_cpu(n) for n in longs)
+    # pessimistic: a failure among the long tests (prob p) costs as much as running blind
+    expected = cpu + p * blind + (1 - p) * cost_rest
+    order = sorted(longs, key=lambda n: (tests_by_num[n]["id"].rsplit("::", 1)[0], test_cpu(n)))
+    return {"cands": cands, "run": order, "held": [], "blind_rest": rest, "blind": blind, "cpu": cpu,
+            "entries": {k: v for k, v in entry_plan.items() if any(tests_by_num[n]["id"] == k for n in longs)},
+            "tpcds_subset": subset if (tpcds_num is not None and tpcds_num in longs) else None,
+            "stop_on_fail": False, "drop_held_if_clean": False, "gain": blind - expected, "kind": "longest"}
 
 
 def main() -> int:
@@ -464,7 +493,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             unseen = {num for i, num in id2num.items() if i not in seen}
             for ce in report["collect_errors"]:
                 failing |= {num for i, num in id2num.items() if i == ce or i.startswith(ce + "::")}
-            chosen = failing | unseen
+            chosen = failing | unseen | set(plan.get("blind_rest", ()))
             for h in plan["held"]:
                 hid = tests_by_num[h]["id"]
                 if hid == MAX_NODES_ID and plan.get("proxy"):
@@ -486,7 +515,8 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             top = sorted(report.get("times", {}).items(), key=lambda kv: -kv[1])[:4]
             log(f"{cid}: suite cpu {report.get('suite_cpu')}s (planned {plan['cpu']:.2f}s); top "
                 + ", ".join(f"{k.split('::')[-1]}={v}" for k, v in top))
-            log(f"{cid}: verified {len(plan['run'])}/{len(plan['cands'])} (held {len(plan['held'])}) in {wall:.2f}s -> {len(failing)} failing, "
+            log(f"{cid}: verified {len(plan['run'])}/{len(plan['cands'])} (held {len(plan['held'])}, "
+                f"{plan.get('kind', 'all')}) in {wall:.2f}s -> {len(failing)} failing, "
                 f"{len(unseen)} unseen; cost {plan['blind']:.3f}s -> {cost_of(results[cid], dur) / 1000:.3f}s")
 
 
