@@ -72,3 +72,8 @@ two sample commits). Sample-based extrapolation is not trusted any more.
 Mechanism evidence (pinned commit, not distribution): test_execute_tpcds executes 17.5% of covered sqlglot
 runtime lines, test_generator_memory 15% (98% of which were lazy-import artifacts, fixed in r13).
 tpcds per-line query subsets: 39% of lines reach <=5 queries, 46% reach >=36 (no partial gain there).
+| probe2 73b9fdd | r14 minus heavy three (measurement only) | – | – | – | – | not submitted |
+| r15 | generator_memory verifiable (measured 2.0 s, was estimated 10.7 s); pytest log/warning capture emulated in runner (r14 runner would have *missed* memory-test failures caused by logging/warnings: adversarial set); gc.freeze() of inherited selector heap in children (generator_memory 12 s -> 0.95 s) | 116.26 | 851.47 | 110.61 | 0/0/0 (+adv 0/2) | pending |
+
+Practice: probe (r12 minus heavy) = 421.627 sim, 1 missed => heavy three cost 76.9 s of r12's 198.5 s; 1 commit needs one.
+Practice: r14 = 178.7 s (172.387 sim + 6.3 CPU), 0 missed (r12 -22.7 s).

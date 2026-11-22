@@ -149,6 +149,11 @@ def _install_tpcds_subset(indices: list[int]) -> None:
 
 def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], nodeids: list[str],
            timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None) -> None:
+    # The selector's own heap (dependency map, cached ASTs) is inherited by the
+    # fork; freeze it so tests that call gc.collect() do not traverse it.
+    import gc
+
+    gc.freeze()
     # Answers go to the real stdout of the parent only: silence ours.
     os.dup2(2, 1)
     sys.stdout = sys.stderr
@@ -361,15 +366,43 @@ def run_unittest(nodeids: list[str]) -> dict:
     times: dict[str, float] = {}
     last = [_cpu()]
 
+    # Reproduce what pytest does around every test, because some tests measure
+    # memory: log records are kept by a capture handler and warnings are recorded
+    # (DeprecationWarning/PendingDeprecationWarning always), both for the test's span.
+    import logging
+    import warnings
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__(0)
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    capture = {}
+
     class Result(unittest.TestResult):
         def startTest(self, test):
             super().startTest(test)
             nid = by_uid.get(test.id())
             if nid:
                 seen.add(nid)
+            handler = _Capture()
+            logging.getLogger().addHandler(handler)
+            cw = warnings.catch_warnings(record=True)
+            cw.__enter__()
+            warnings.filterwarnings("always", category=DeprecationWarning)
+            warnings.filterwarnings("always", category=PendingDeprecationWarning)
+            capture[test.id()] = (handler, cw)
             last[0] = _cpu()
 
         def stopTest(self, test):
+            handler, cw = capture.pop(test.id(), (None, None))
+            if cw is not None:
+                cw.__exit__(None, None, None)
+            if handler is not None:
+                logging.getLogger().removeHandler(handler)
             super().stopTest(test)
             nid = by_uid.get(test.id())
             if nid:
@@ -463,6 +496,9 @@ def collect(jobs: list[Job], poll: float = 0.05) -> list[tuple[Job, dict | None]
 
 
 def _import_child(src_root: str, new_files, modules: list[str], wfd: int) -> None:
+    import gc
+
+    gc.freeze()
     os.dup2(2, 1)
     sys.stdout = sys.stderr
     sys.dont_write_bytecode = True
