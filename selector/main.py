@@ -350,7 +350,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
             p_heavy = 0.3  # P(max_nodes itself fails | it is a candidate): no labeled case so far
             expected = cpu + proxy_cpu + p_heavy * (heavy_blind + 2.0 + light) + (1 - p_heavy) * p * light
         plan.update(drop_held_if_clean=True, gain=blind - expected, cpu=cpu + proxy_cpu)
-        if plan["gain"] < MIN_GAIN:
+        if plan["gain"] < MIN_GAIN and not ACCEPT_ALL:
             a.plan_note = f"expected gain {plan['gain']:.2f} < {MIN_GAIN} (held plan, cpu {plan['cpu']:.1f})"
             return None
         return plan
@@ -369,7 +369,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     long_plan = longest_plan(a, cands, run, tests_by_num, dur, test_cpu, file_setup, p, blind, entry_plan, subset,
                              tpcds_num)
     best = max((x for x in (plan, long_plan) if x is not None), key=lambda x: x["gain"])
-    if best["gain"] < MIN_GAIN:
+    if best["gain"] < MIN_GAIN and not ACCEPT_ALL:
         a.plan_note = f"expected gain {best['gain']:.2f} < {MIN_GAIN} (cpu {best['cpu']:.1f}, blind {blind:.1f})"
         return None
     return best
@@ -673,6 +673,7 @@ def check_imports(analyses, results, full, t0) -> None:
 
 
 AUDIT_VERIFIED: dict = {}  # logging only (audit branch)
+ACCEPT_ALL = os.environ.get("BR_ACCEPT_ALL") == "1"  # experiment: verify every plan whatever its expected gain
 
 
 def audit_log(patches, analyses, results, full, tests_by_num, dur) -> None:
@@ -779,7 +780,8 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                 continue
             analyses[cid].import_ok = True
             AUDIT_VERIFIED[cid] = {"child_cpu": round(getattr(job, "cpu", 0.0), 3), "planned_cpu": round(plan["cpu"], 3),
-                                   "stage": report.get("tpcds_stage"), "kind": plan.get("kind", "all")}
+                                   "stage": report.get("tpcds_stage"), "kind": plan.get("kind", "all"),
+                                   "exp_gain": round(plan.get("gain", 0.0), 3), "held": len(plan["held"])}
             failed_ids = set(report["failed"])
             seen = set(report["seen"]) | set(report.get("proven_pass", ()))
             if report.get("tpcds_stage"):
