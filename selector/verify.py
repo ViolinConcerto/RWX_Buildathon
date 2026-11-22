@@ -148,7 +148,7 @@ def _install_tpcds_subset(indices: list[int]) -> None:
 
 
 def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], nodeids: list[str],
-           timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None) -> None:
+           timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None, stop_on_fail=False) -> None:
     # The selector's own heap (dependency map, cached ASTs) is inherited by the
     # fork; freeze it so tests that call gc.collect() do not traverse it.
     import gc
@@ -236,7 +236,7 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             report = {"ok": True, "failed": sorted(plugin.failed), "seen": sorted(plugin.seen),
                       "collect_errors": plugin.collect_errors}
         else:
-            report = run_unittest(nodeids)
+            report = run_unittest(nodeids, stop_on_fail)
     except BaseException as e:  # noqa: BLE001
         report = {"ok": False, "error": repr(e)}
     data = json.dumps(report).encode()
@@ -247,7 +247,7 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
     os.close(wfd)
 
 
-def run_unittest(nodeids: list[str]) -> dict:
+def run_unittest(nodeids: list[str], stop_on_fail: bool = False) -> dict:
     """Run pytest-style node ids (file::Class::method) with plain unittest.
 
     Outcome rules match how the labels were produced with pytest: a test fails
@@ -292,7 +292,11 @@ def run_unittest(nodeids: list[str]) -> dict:
         by_module.setdefault(cls.__module__, []).append(nid)
         suite.addTest(test)
 
+    holder: list = []
+
     def mark(test) -> None:
+        if stop_on_fail and holder:
+            holder[0].shouldStop = True  # tests not run are reported unseen -> selected
         nid = by_uid.get(test.id()) if hasattr(test, "id") else None
         if nid is not None:
             failed.add(nid)
@@ -428,7 +432,8 @@ def run_unittest(nodeids: list[str]) -> dict:
             mark(test)
 
     t0 = _cpu()
-    suite.run(Result())
+    holder.append(Result())
+    suite.run(holder[0])
     return {"ok": True, "failed": sorted(failed), "seen": sorted(seen), "collect_errors": collect_errors,
             "times": times, "suite_cpu": round(_cpu() - t0, 3)}
 
@@ -441,7 +446,7 @@ class Job:
 
 
 def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], timeout_s: float,
-          import_modules=(), tpcds_indices=None) -> Job:
+          import_modules=(), tpcds_indices=None, stop_on_fail=False) -> Job:
     rfd, wfd = os.pipe()
     tmp_dir = os.path.join(tmp_root, str(key))
     sys.stdout.flush()
@@ -451,7 +456,7 @@ def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], time
         code = 0
         try:
             os.close(rfd)
-            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules, tpcds_indices)
+            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules, tpcds_indices, stop_on_fail)
         except BaseException:  # noqa: BLE001
             code = 1
         finally:

@@ -57,6 +57,13 @@ PER_FILE_OVERHEAD = 0.03
 FILE_SETUP_CPU = {"tests/test_executor.py": 1.9, "tests/test_optimizer.py": 0.1}
 MIN_GAIN = 0.15  # skip coin-flip verifications whose expected gain is within noise
 TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+MAX_NODES_ID = "tests/test_parser.py::TestParser::test_max_nodes"
+TPCDS_RUN_LIMIT = 8.0   # CPU seconds of affected TPC-DS queries we are willing to re-run
+# Rule A1 (statistical, not a proof): the two tests too expensive to re-run are
+# selected only when a cheaper candidate fails. On 255 labeled patches, tpcds
+# failed 14 times and never without a sub-second test failing too.
+RULE_A1 = os.environ.get("BR_A1", "1") == "1"
+FORCE = os.environ.get("BR_FORCE", "0") == "1"  # measurement probes: verify everything runnable
 # P(test_execute_tpcds itself fails | the commit breaks something), for commits
 # that reach it through few queries (labeled sets: 1 of 4); kept pessimistic.
 P_TPCDS_GIVEN_BREAK = 0.6
@@ -142,14 +149,25 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     ):
         return None  # added/removed files: listings would differ; keep static answer
     cands = sorted(a.candidates)
-    files = {tests_by_num[n]["file"] for n in cands}
     blind = cost_of(partition(cands, dur), dur) / 1000
     tpcds_num = next((n for n in cands if tests_by_num[n]["id"] == TPCDS_ID), None)
     subset = tpcds_subset(a) if tpcds_num is not None else None
+    subset_cpu = (1.15 * sum(QMAP["suites"]["tpcds"]["cpu"][i] for i in subset)) if subset is not None else None
+
+    # Tests too expensive to re-run here: kept or dropped by rule, never executed.
+    held = []
+    for n in cands:
+        tid = tests_by_num[n]["id"]
+        if tid == MAX_NODES_ID or (tid == TPCDS_ID and (subset_cpu is None or subset_cpu > TPCDS_RUN_LIMIT)):
+            held.append(n)
+    run = [n for n in cands if n not in held]
+    if not run:
+        return None
+    files = {tests_by_num[n]["file"] for n in run}
 
     def test_cpu(n):
-        if n == tpcds_num and subset is not None:
-            return 1.15 * sum(QMAP["suites"]["tpcds"]["cpu"][i] for i in subset) + PER_TEST_CPU
+        if n == tpcds_num:
+            return subset_cpu + PER_TEST_CPU
         tid = tests_by_num[n]["id"]
         if tid in TEST_CPU:
             return 1.1 * TEST_CPU[tid] + PER_TEST_CPU
@@ -159,8 +177,32 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
         return SETUP_CPU[f] if f in SETUP_CPU else FILE_SETUP_CPU.get(f, 0.0)
 
     cpu = BASE_OVERHEAD + PER_FILE_OVERHEAD * len(files) + sum(file_setup(f) for f in files) + sum(
-        test_cpu(n) for n in cands)
+        test_cpu(n) for n in run)
     p = P_BREAK[category(a)]
+    # Run order: cheap classes first (class fixtures stay grouped), executor last.
+    cls_cost: dict[str, float] = {}
+    for n in run:
+        c = tests_by_num[n]["id"].rsplit("::", 1)[0]
+        cls_cost[c] = cls_cost.get(c, 0.0) + test_cpu(n)
+    order = sorted(run, key=lambda n: (file_setup(tests_by_num[n]["file"]) > 0.5,
+                                       cls_cost[tests_by_num[n]["id"].rsplit("::", 1)[0]],
+                                       tests_by_num[n]["id"].rsplit("::", 1)[0], test_cpu(n)))
+    plan = {"cands": cands, "run": order, "held": held, "blind": blind, "cpu": cpu,
+            "tpcds_subset": subset if (tpcds_num is not None and tpcds_num in run) else None,
+            "stop_on_fail": False, "drop_held_if_clean": False}
+    if held:
+        if FORCE:
+            plan["gain"] = 1.0  # probe: exact outcome of everything runnable, held tests kept
+            return plan
+        if not RULE_A1:
+            return None
+        # Rule A1: held tests are selected only if some runnable candidate fails.
+        # Stop at the first failure: the rest are then selected unrun (they ride
+        # along under the held test's load).
+        cpu_eff = (1 - p) * cpu + p * min(cpu, 0.3 * cpu + 0.5)
+        expected = cpu_eff + p * blind
+        plan.update(stop_on_fail=True, drop_held_if_clean=True, gain=blind - expected, cpu=cpu)
+        return plan if plan["gain"] >= MIN_GAIN else None
     if tpcds_num is not None:
         rest = [n for n in cands if n != tpcds_num]
         blind_rest = cost_of(partition(rest, dur), dur) / 1000
@@ -169,10 +211,11 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     else:
         exp_fail_cost = min(blind, 2.0 + 0.3 * max(0.0, blind - 2.0))
     expected = cpu + p * exp_fail_cost
-    if blind - expected < MIN_GAIN:
-        return None
-    return {"cands": cands, "blind": blind, "cpu": cpu, "gain": blind - expected,
-            "tpcds_subset": subset if tpcds_num is not None else None}
+    plan["gain"] = blind - expected
+    if FORCE:
+        plan["gain"] = max(plan["gain"], 1.0)
+        return plan
+    return plan if plan["gain"] >= MIN_GAIN else None
 
 
 def main() -> int:
@@ -299,7 +342,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
     # 4.5 min for the final (~60). Stay well inside: ~1.6 s of wall per commit.
     # Hard limits: 180 s (practice, ~40 commits) / 270 s (final, ~60) for the batch;
     # static analysis takes a few seconds, two children run in parallel.
-    budget_end = t0 + min(140.0, max(30.0, 2.5 * n))
+    budget_end = t0 + min(150.0, max(30.0, 3.0 * n))
     tv = time.monotonic()
     heavy_users = sum(1 for _, _, plan in plans
                       if any(tests_by_num[x]["file"] == "tests/test_optimizer.py" for x in plan["cands"]))
@@ -318,10 +361,10 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                 log(f"{cid}: skip verify (budget)")
                 continue
             a = analyses[cid]
-            nodeids = [tests_by_num[x]["id"] for x in plan["cands"]]
+            nodeids = [tests_by_num[x]["id"] for x in plan["run"]]
             timeout = min(remaining, max(8.0, 4 * plan["cpu"] + 5))
             job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout, sorted(a.import_check),
-                               plan.get("tpcds_subset"))
+                               plan.get("tpcds_subset"), plan["stop_on_fail"])
             meta[cid] = plan
             jobs.append(job)
         if not jobs:
@@ -343,19 +386,21 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             analyses[cid].import_ok = True
             failed_ids = set(report["failed"])
             seen = set(report["seen"])
-            id2num = {tests_by_num[x]["id"]: x for x in plan["cands"]}
+            id2num = {tests_by_num[x]["id"]: x for x in plan["run"]}
             failing = {id2num[i] for i in failed_ids if i in id2num}
             unseen = {num for i, num in id2num.items() if i not in seen}
             for ce in report["collect_errors"]:
                 failing |= {num for i, num in id2num.items() if i == ce or i.startswith(ce + "::")}
             chosen = failing | unseen
+            if plan["held"] and (chosen or not plan["drop_held_if_clean"]):
+                chosen |= set(plan["held"])
             results[cid] = partition(chosen, dur)
             if plan.get("tpcds_subset") is not None:
                 log(f"{cid}: tpcds restricted to {len(plan['tpcds_subset'])} queries")
             top = sorted(report.get("times", {}).items(), key=lambda kv: -kv[1])[:4]
             log(f"{cid}: suite cpu {report.get('suite_cpu')}s (planned {plan['cpu']:.2f}s); top "
                 + ", ".join(f"{k.split('::')[-1]}={v}" for k, v in top))
-            log(f"{cid}: verified {len(plan['cands'])} in {wall:.2f}s -> {len(failing)} failing, "
+            log(f"{cid}: verified {len(plan['run'])}/{len(plan['cands'])} (held {len(plan['held'])}) in {wall:.2f}s -> {len(failing)} failing, "
                 f"{len(unseen)} unseen; cost {plan['blind']:.3f}s -> {cost_of(results[cid], dur) / 1000:.3f}s")
 
 
