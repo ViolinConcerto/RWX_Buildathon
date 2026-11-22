@@ -281,8 +281,8 @@ def main() -> None:
             pass
     subclasses: dict[str, list[str]] = {}
 
-    def qual(c) -> str:
-        return f"{c.__module__}:{c.__qualname__}"
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from classkey import class_key as qual
 
     seen = set()
     stack = [object]

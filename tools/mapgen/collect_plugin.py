@@ -36,6 +36,38 @@ _reads: dict[str, set[str]] = {}
 _classes: dict[str, set[type]] = {}
 
 
+def _install_import_context() -> None:
+    """Attribute lines executed while a module body runs to the 'import' context.
+
+    A test that merely triggers a lazy import (e.g. the first one to touch a
+    dialect) did not *use* that module's import-time code; the import-time
+    effects are handled separately (import closure, definition rules, patched
+    import check). Without this, coverage depends on test order.
+    """
+    import importlib._bootstrap_external as be
+
+    stack: list[str] = []
+
+    def wrap(cls):
+        original = cls.exec_module
+
+        def exec_module(self, module, __original=original):
+            name = getattr(module, "__name__", "")
+            if not (name == "sqlglot" or name.startswith("sqlglot.")):
+                return __original(self, module)
+            stack.append(_context[0])
+            _set_context("import")
+            try:
+                return __original(self, module)
+            finally:
+                _set_context(stack.pop())
+
+        cls.exec_module = exec_module
+
+    wrap(be.SourceFileLoader)
+    wrap(be.SourcelessFileLoader)
+
+
 def _install_instance_hooks() -> None:
     """Record, per context, the concrete classes of sqlglot objects created."""
     from sqlglot.dialects.dialect import Dialect
@@ -133,6 +165,7 @@ def pytest_configure(config):
 
     cfp.ProcessPoolExecutor = InlinePickleExecutor
     sys.addaudithook(_audit)
+    _install_import_context()
     _cov.start()
     _set_context("init")
     _install_instance_hooks()
@@ -187,4 +220,6 @@ def pytest_unconfigure(config):
     with open(os.path.join(OUT, "outcomes.json"), "w") as f:
         json.dump(_outcomes, f)
     with open(os.path.join(OUT, "classes.json"), "w") as f:
-        json.dump({k: sorted(f"{c.__module__}:{c.__qualname__}" for c in v) for k, v in _classes.items()}, f)
+        from classkey import class_key
+
+        json.dump({k: sorted({class_key(c) for c in v}) for k, v in _classes.items()}, f)
