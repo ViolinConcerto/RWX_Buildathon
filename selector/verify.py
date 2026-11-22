@@ -128,7 +128,7 @@ class _OutcomePlugin:
 
 
 def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], nodeids: list[str],
-           timeout_s: float, wfd: int) -> None:
+           timeout_s: float, wfd: int, import_modules=()) -> None:
     # Answers go to the real stdout of the parent only: silence ours.
     os.dup2(2, 1)
     sys.stdout = sys.stderr
@@ -181,6 +181,20 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
     os.chdir(src_root)
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
 
+    import_errors = {}
+    for mod in sorted(import_modules):
+        try:
+            importlib.import_module(mod)
+        except BaseException as e:  # noqa: BLE001
+            import_errors[mod] = f"{type(e).__name__}: {e}"[:300]
+    if import_errors:
+        report = {"ok": True, "import_errors": import_errors, "failed": [], "seen": [], "collect_errors": []}
+        data = json.dumps(report).encode()
+        view = memoryview(data)
+        while view:
+            view = view[os.write(wfd, view):]
+        os.close(wfd)
+        return
     try:
         if os.environ.get("BR_RUNNER") == "pytest":
             import pytest
@@ -298,7 +312,8 @@ class Job:
         self.started = time.monotonic()
 
 
-def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], timeout_s: float) -> Job:
+def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], timeout_s: float,
+          import_modules=()) -> Job:
     rfd, wfd = os.pipe()
     tmp_dir = os.path.join(tmp_root, str(key))
     sys.stdout.flush()
@@ -308,7 +323,7 @@ def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], time
         code = 0
         try:
             os.close(rfd)
-            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd)
+            _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules)
         except BaseException:  # noqa: BLE001
             code = 1
         finally:

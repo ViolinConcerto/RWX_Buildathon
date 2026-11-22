@@ -180,8 +180,23 @@ def _expr_diffs(old, new, in_lambda: bool, out: list) -> None:
 
 
 class _Differ:
-    def __init__(self) -> None:
+    def __init__(self, old_lines=None, new_lines=None) -> None:
         self.facts: list = []
+        self.old_lines = old_lines
+        self.new_lines = new_lines
+
+    def _text(self, node, lines) -> str:
+        """Source text of a statement: a cheap key; equal text implies equal AST."""
+        if lines is None:
+            return _dump(node)
+        return "\n".join(lines[node.lineno - 1:(node.end_lineno or node.lineno)])
+
+    def _same(self, o, n) -> bool:
+        if self.old_lines is not None and self._text(o, self.old_lines) == self._text(n, self.new_lines):
+            return True
+        if _is_compound(o):
+            return False  # decide per field/child: never dump whole bodies
+        return _dump(o) == _dump(n)
 
     # -- whole-statement changes ------------------------------------------------
     def changed_whole(self, node, scope, in_func, note="") -> None:
@@ -220,8 +235,8 @@ class _Differ:
 
     # -- recursive diff --------------------------------------------------------
     def block(self, old_list, new_list, scope, in_func, parent=None) -> None:
-        ok = [_dump(s) for s in old_list]
-        nk = [_dump(s) for s in new_list]
+        ok = [self._text(s, self.old_lines) for s in old_list]
+        nk = [self._text(s, self.new_lines) for s in new_list]
         sm = difflib.SequenceMatcher(a=ok, b=nk, autojunk=False)
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
             if tag == "equal":
@@ -252,7 +267,7 @@ class _Differ:
                         self.facts.append(Runtime(_header_span(a) if _is_compound(a) else _span(a), "del-neighbour"))
 
     def stmt(self, o, n, scope, in_func) -> None:
-        if _dump(o) == _dump(n):
+        if self._same(o, n):
             return
         if type(o) is not type(n):
             self.changed_whole(o, scope, in_func)
@@ -340,21 +355,32 @@ def _is_compound(node) -> bool:
     return any(hasattr(node, f) for f in ("body", "handlers", "cases"))
 
 
-def diff_python(old_src: bytes, new_src: bytes) -> DiffResult:
+def diff_python(old_src: bytes, new_src: bytes, old_tree=None) -> DiffResult:
+    import warnings
+
     res = DiffResult()
     try:
-        old_tree = ast.parse(old_src)
+        old_tree = old_tree if old_tree is not None else ast.parse(old_src)
     except SyntaxError:
         res.facts.append(Broad("old-syntax"))
         return res
     try:
-        new_tree = ast.parse(new_src)
-        compile(new_src, "<patched>", "exec", dont_inherit=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            new_tree = ast.parse(new_src)
+            # Code generation catches what parsing does not ('return' outside a
+            # function, bad nonlocal/global, ...); reuse the tree instead of reparsing.
+            compile(new_tree, "<patched>", "exec", dont_inherit=True)
     except (SyntaxError, ValueError):
         res.syntax_error = True
         res.facts.append(Broad("syntax-error"))
         return res
-    d = _Differ()
+    try:
+        old_lines = old_src.decode("utf-8").split("\n")
+        new_lines = new_src.decode("utf-8").split("\n")
+    except UnicodeDecodeError:
+        old_lines = new_lines = None
+    d = _Differ(old_lines, new_lines)
     d.block(old_tree.body, new_tree.body, (), False)
     res.facts = d.facts
     return res

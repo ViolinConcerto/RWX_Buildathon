@@ -1,0 +1,121 @@
+commit,kind_debug,selected,failing,extra,miss,workers,busiest_ms,overhead_ms,cost_ms,oracle_ms,gap_ms,heaviest,heaviest_fails,verified,reason
+m01030,delete-stmt,1620,0,1620,0,4,28817,8000,36817,0,36817,test_max_nodes(28817ms),0,,"EVERYTHING | sqlglot.__main__.['obj']: read at import, no class users ; sqlglot.__main__.['expression', 'objs'] module-level -> 1547 (derived ['obj']) ; sqlglot"
+m01033,code-def,1620,0,1620,0,4,28817,8000,36817,0,36817,test_max_nodes(28817ms),0,,"EVERYTHING | sqlglot.errors.['highlight_sql']: read at import, no class users ; sqlglot.errors.['ERROR_MESSAGE_CONTEXT_DEFAULT'] module-level -> 0 (derived ['hi"
+m01072,code-def,1620,0,1620,0,4,28817,8000,36817,0,36817,test_max_nodes(28817ms),0,,EVERYTHING | sqlglot/dialects/fabric.py: definition change with no names
+m01108,code,1620,16,1604,0,4,28817,8000,36817,2005,34812,test_max_nodes(28817ms),0,,"EVERYTHING | sqlglot/errors.py:149 import-time code in ['highlight_sql'] ; sqlglot.errors.['highlight_sql']: read at import, no class users"
+m01086,code-def,1571,1,1570,0,4,28817,8000,36817,2073,34744,test_max_nodes(28817ms),0,,"| sqlglot.executor.env.['_', 'a', 'arg', 'e', 'x'] module-level -> 1571 (derived []) ; sqlglot.executor.env.['ENV'] module-level -> 53 (derived ['_', 'a', 'arg'"
+m01013,delete-stmt,1620,14,1606,0,4,28817,8000,36817,2189,34628,test_max_nodes(28817ms),0,,EVERYTHING | sqlglot.dialects.dremio:Dremio.['Parser'] users(import_read=True) -> 37 ; sqlglot/dialects/dremio.py: definition change with no names
+m01003,delete-stmt,1620,3,1617,0,4,28817,8000,36817,2212,34605,test_max_nodes(28817ms),0,,EVERYTHING | sqlglot.dialects.postgres:Postgres.Tokenizer.['HEREDOC_STRING_ALTERNATIVE'] users(import_read=True) -> 378 ; sqlglot/dialects/postgres.py: definiti
+m01028,delete-stmt,1620,1,1619,0,4,28817,8000,36817,3963,32854,test_max_nodes(28817ms),0,,EVERYTHING | sqlglot.expressions.aggregate:AISummarizeAgg.['_sql_names'] users(import_read=True) -> 3 ; sqlglot/expressions/aggregate.py: definition change with
+m01101,fixture,61,0,61,0,2,21454,4000,25454,0,25454,test_execute_tpcds(21454ms),0,,| data tests/fixtures/optimizer/tpc-h/tpc-h.sql
+m01114,syntax,1620,1052,568,0,4,28817,8000,36817,13783,23034,test_max_nodes(28817ms),0,,EVERYTHING | syntax error in sqlglot/typing/spark2.py
+m01006,code,104,1,103,0,2,21454,4000,25454,2596,22858,test_execute_tpcds(21454ms),0,,| sqlglot/optimizer/simplify.py:1575 runtime[header] -> 104
+m01021,code,4,3,1,0,2,21454,4000,25454,4625,20829,test_execute_tpcds(21454ms),0,,| sqlglot/optimizer/optimize_joins.py:55 runtime[stmt] -> 4
+m01004,code,12,5,7,0,2,21454,4000,25454,5318,20136,test_execute_tpcds(21454ms),0,,| sqlglot/optimizer/unnest_subqueries.py:174 runtime[header] -> 12
+m01065,fixture,61,2,59,0,2,21454,4000,25454,5892,19562,test_execute_tpcds(21454ms),0,,| data tests/fixtures/optimizer/tpc-h/tpc-h.sql
+m01080,code,9,6,3,0,2,21454,4000,25454,6055,19399,test_execute_tpcds(21454ms),0,,| sqlglot/optimizer/merge_subqueries.py:382 runtime[header] -> 9
+m01078,fixture,61,3,58,0,2,21454,4000,25454,7892,17562,test_execute_tpcds(21454ms),0,,| data tests/fixtures/optimizer/tpc-h/tpc-h.sql
+m01012,delete-stmt,167,0,167,0,3,6606,6000,12606,0,12606,test_scope(2533ms),0,,| sqlglot/optimizer/__init__.py:61 import-time code in ['__getattr__'] ; sqlglot.optimizer.['__getattr__'] module-level -> 0 (derived [])
+m01079,code-def,143,0,143,0,2,7048,4000,11048,0,11048,test_generator_memory(6686ms),0,,| sqlglot.dialects.trino:Trino.['SUPPORTS_USER_DEFINED_TYPES'] users(import_read=True) -> 143
+m01001,code-def,6,0,6,0,2,6686,4000,10686,0,10686,test_generator_memory(6686ms),0,,| sqlglot/parsers/databricks.py:45 runtime[lambda-body] -> 6
+m01112,delete-stmt,1620,1161,459,0,4,28817,8000,36817,27454,9363,test_max_nodes(28817ms),0,,EVERYTHING | sqlglot.dialects.hive:Hive.['COERCES_TO'] users&readers -> 67 ; sqlglot/dialects/hive.py: definition change with no names
+m01037,code-def,7,1,6,0,2,6686,4000,10686,2662,8024,test_generator_memory(6686ms),0,,| sqlglot/parsers/oracle.py:72 runtime[lambda-body] -> 7
+m01035,code,1620,1370,250,0,4,28817,8000,36817,29454,7363,test_max_nodes(28817ms),0,,"EVERYTHING | sqlglot/parser.py:9258 import-time code in ['_parse_id_var'] ; sqlglot.parser.['_parse_id_var']: read at import, no class users"
+m01093,code-def,195,2,193,0,2,5226,4000,9226,2026,7200,test_annotate_funcs(1963ms),0,,| sqlglot.parsers.spark2:Spark2Parser.['FUNCTIONS'] users(import_read=True) -> 195
+m01109,code-def+test-file,194,3,191,0,2,5220,4000,9220,2588,6632,test_annotate_funcs(1963ms),0,,| sqlglot.parsers.spark:SparkParser.['FUNCTIONS'] users(import_read=True) -> 193 ; test file tests/dialects/test_teradata.py
+m01104,code-def,66,2,64,0,2,3334,4000,7334,2036,5298,test_annotate_funcs(1963ms),0,,| sqlglot.parsers.redshift:RedshiftParser.['FUNCTIONS'] users(import_read=True) -> 66
+m01032,fixture,1,0,1,0,1,1963,2000,3963,0,3963,test_annotate_funcs(1963ms),0,,| data tests/fixtures/optimizer/annotate_functions.sql
+m01039,fixture,2,0,2,0,1,835,2000,2835,0,2835,test_serde(506ms),0,,| data tests/fixtures/identity.sql
+m01000,fixture,1,0,1,0,1,596,2000,2596,0,2596,test_simplify(596ms),0,,| data tests/fixtures/optimizer/simplify.sql
+m01089,fixture,1,0,1,0,1,83,2000,2083,0,2083,test_pushdown_predicates(83ms),0,,| data tests/fixtures/optimizer/pushdown_predicates.sql
+m01025,code-def,4,0,4,0,1,54,2000,2054,0,2054,test_ddl(24ms),0,,| sqlglot.expressions.properties:SerdeProperties.['arg_types'] users(import_read=True) -> 4
+m01005,code,2,0,2,0,1,40,2000,2040,0,2040,test_pivot_columns(37ms),0,,| sqlglot/parsers/starrocks.py:116 runtime[stmt] -> 2
+m01040,fixture,1,0,1,0,1,37,2000,2037,0,2037,test_qualify_columns__invalid(37ms),0,,| data tests/fixtures/optimizer/qualify_columns__invalid.sql
+m01049,fixture,1,0,1,0,1,37,2000,2037,0,2037,test_qualify_columns__invalid(37ms),0,,| data tests/fixtures/optimizer/qualify_columns__invalid.sql
+m01043,comment,1,0,1,0,1,11,2000,2011,0,2011,test_no_redundant_expression_metadata(11ms),0,,| 
+m01068,code,1,0,1,0,1,11,2000,2011,0,2011,test_no_redundant_expression_metadata(11ms),0,,| sqlglot/typing/duckdb.py:38 runtime[header] -> 0
+m01097,test-file,1,0,1,0,1,9,2000,2009,0,2009,test_druid(9ms),0,,| test file tests/dialects/test_druid.py
+m01010,fixture,1,0,1,0,1,7,2000,2007,0,2007,test_pushdown_cte_alias_columns(7ms),0,,| data tests/fixtures/optimizer/pushdown_cte_alias_columns.sql
+m01047,fixture,1,0,1,0,1,7,2000,2007,0,2007,test_pushdown_cte_alias_columns(7ms),0,,| data tests/fixtures/optimizer/pushdown_cte_alias_columns.sql
+m01087,fixture,1,0,1,0,1,6,2000,2006,0,2006,test_eliminate_ctes(6ms),0,,| data tests/fixtures/optimizer/eliminate_ctes.sql
+m01099,fixture,1,0,1,0,1,3,2000,2003,0,2003,test_partial(3ms),0,,| data tests/fixtures/partial.sql
+m01118,code,39,1,38,0,1,1969,2000,3969,2009,1960,test_qualify_columns(1406ms),0,,| sqlglot/parsers/starrocks.py:166 runtime[stmt] -> 39
+m01091,code+code,20,3,17,0,1,2874,2000,4874,3408,1466,test_qualify_columns(1406ms),1,,| sqlglot/jsonpath.py:158 runtime[stmt] -> 17 ; sqlglot/optimizer/qualify_columns.py:617 runtime[header] -> 3
+m01076,code,16,4,12,0,1,1871,2000,3871,3426,445,test_qualify_columns(1406ms),1,,| sqlglot/optimizer/resolver.py:480 runtime[stmt] -> 16
+m01081,delete-stmt,2,1,1,0,1,416,2000,2416,2021,395,test_optimize(395ms),0,,| sqlglot/optimizer/eliminate_subqueries.py:196 runtime[stmt] -> 2
+m01038,code,27,2,25,0,1,317,2000,2317,2016,301,test_datetime_functions(96ms),0,,| sqlglot/parsers/exasol.py:142 runtime[header] -> 27
+m01046,code,4,3,1,0,1,102,2000,2102,2076,26,test_redshift(45ms),1,,| sqlglot/generators/teradata.py:162 runtime[header] -> 4
+m01026,code,23,22,1,0,1,1431,2000,3431,3412,19,test_bigquery(436ms),1,,| sqlglot/generators/presto.py:518 runtime[header] -> 23
+m01085,code,3,2,1,0,1,382,2000,2382,2366,16,test_duckdb(287ms),1,,| sqlglot/parsers/duckdb.py:32 runtime[stmt] -> 3
+m01062,code,11,10,1,0,1,43,2000,2043,2028,15,test_edit_script_is_deterministic(15ms),0,,| sqlglot/diff.py:269 runtime[header] -> 11
+m01084,code+code,22,21,1,0,1,2432,2000,4432,4417,15,test_annotate_funcs(1963ms),1,,| sqlglot/parsers/mysql.py:513 runtime[header] -> 3 ; sqlglot/parsers/athena.py:74 runtime[stmt] -> 19
+m01002,code,49,48,1,0,1,22605,2000,24605,24592,13,test_execute_tpcds(21454ms),1,,| sqlglot/executor/context.py:70 runtime[stmt] -> 49
+m01014,code,52,51,1,0,1,22799,2000,24799,24786,13,test_execute_tpcds(21454ms),1,,| sqlglot/executor/python.py:86 runtime[stmt] -> 52
+m01020,code,50,49,1,0,1,22618,2000,24618,24605,13,test_execute_tpcds(21454ms),1,,| sqlglot/executor/table.py:88 runtime[header] -> 50
+m01088,code,4,2,2,0,1,56,2000,2056,2044,12,test_pivot_columns(37ms),1,,| sqlglot/parsers/starrocks.py:106 runtime[header] -> 4
+m01058,code,3,2,1,0,1,2369,2000,4369,4358,11,test_annotate_funcs(1963ms),1,,| sqlglot/typing/snowflake.py:98 runtime[header] -> 2
+m01051,code-def+code,5,3,2,0,1,2412,2000,4412,4407,5,test_annotate_funcs(1963ms),1,,| sqlglot.expressions.string:RegexpSubstr.['arg_types'] users(import_read=True) -> 2 ; sqlglot/parsers/bigquery.py:165 runtime[stmt] -> 4
+m01055,code,5,4,1,0,1,1536,2000,3536,3533,3,test_qualify_columns(1406ms),1,,| sqlglot/optimizer/qualify_tables.py:177 runtime[header] -> 5
+m01042,comment+code,2,1,1,0,1,7,2000,2007,2005,2,test_varchar_precision_inference(5ms),1,,| sqlglot/parsers/fabric.py:13 runtime[header] -> 2
+m01007,fixture,1,1,0,0,1,7,2000,2007,2007,0,test_pushdown_cte_alias_columns(7ms),1,,| data tests/fixtures/optimizer/pushdown_cte_alias_columns.sql
+m01008,fixture,1,1,0,0,1,8,2000,2008,2008,0,test_isolate_table_selects(8ms),1,,| data tests/fixtures/optimizer/isolate_table_selects.sql
+m01009,fixture,1,1,0,0,1,38,2000,2038,2038,0,test_optimize_joins(38ms),1,,| data tests/fixtures/optimizer/optimize_joins.sql
+m01011,fixture,1,1,0,0,1,90,2000,2090,2090,0,test_qualify_tables(90ms),1,,| data tests/fixtures/optimizer/qualify_tables.sql
+m01015,code,7,7,0,0,1,472,2000,2472,2472,0,test_duckdb(287ms),1,,| sqlglot/expressions/query.py:177 runtime[stmt] -> 7
+m01016,code,1620,1489,131,0,4,28817,8000,36817,36817,0,test_max_nodes(28817ms),1,,"EVERYTHING | sqlglot/parser.py:6386 import-time code in ['_parse_comparison'] ; sqlglot.parser.['_parse_comparison']: read at import, no class users"
+m01017,fixture,1,1,0,0,1,213,2000,2213,2213,0,test_canonicalize_internal_names(213ms),1,,| data tests/fixtures/optimizer/canonicalize_internal_names.sql
+m01018,fixture,1,1,0,0,1,92,2000,2092,2092,0,test_pushdown_projection(92ms),1,,| data tests/fixtures/optimizer/pushdown_projections.sql
+m01019,fixture,1,1,0,0,1,395,2000,2395,2395,0,test_optimize(395ms),1,,| data tests/fixtures/optimizer/optimizer.sql
+m01022,fixture,1,1,0,0,1,8,2000,2008,2008,0,test_isolate_table_selects(8ms),1,,| data tests/fixtures/optimizer/isolate_table_selects.sql
+m01023,code,4,4,0,0,1,2129,2000,4129,4129,0,test_annotate_funcs(1963ms),1,,| sqlglot/parsers/spark.py:43 runtime[header] -> 4
+m01024,fixture,1,1,0,0,1,395,2000,2395,2395,0,test_optimize(395ms),1,,| data tests/fixtures/optimizer/optimizer.sql
+m01027,test-file,1,1,0,0,1,24,2000,2024,2024,0,test_types(24ms),1,,| test file tests/dialects/test_singlestore.py
+m01029,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+m01031,fixture,1,1,0,0,1,1006,2000,3006,3006,0,test_canonicalize(1006ms),1,,| data tests/fixtures/optimizer/canonicalize.sql
+m01034,delete-stmt,1,1,0,0,1,2,2000,2002,2002,0,test_optimize_error_highlighting(2ms),1,,| sqlglot/optimizer/qualify_columns.py:163 runtime[stmt] -> 1
+m01036,fixture,1,1,0,0,1,3,2000,2003,2003,0,test_partial(3ms),1,,| data tests/fixtures/partial.sql
+m01041,code,1,1,0,0,1,105,2000,2105,2105,0,test_eliminate_joins(105ms),1,,| sqlglot/optimizer/eliminate_joins.py:147 runtime[stmt] -> 1
+m01044,code,7,7,0,0,1,1049,2000,3049,3049,0,test_snowflake(662ms),1,,| sqlglot/generators/snowflake.py:823 runtime[header] -> 7
+m01045,code,2,2,0,0,1,66,2000,2066,2066,0,test_decimal_literals(59ms),1,,| sqlglot/parsers/hive.py:171 runtime[header] -> 2
+m01048,code,9,9,0,0,1,1838,2000,3838,3838,0,test_snowflake(662ms),1,,| sqlglot/generators/snowflake.py:1055 runtime[header] -> 9
+m01050,code,1,1,0,0,1,27,2000,2027,2027,0,test_time(27ms),1,,| sqlglot/parsers/presto.py:46 runtime[header] -> 1
+m01052,test-file,1,1,0,0,1,1,2000,2001,2001,0,test_entry_point_plugin_discovery_modern_api(1ms),1,,| test file tests/test_dialect_entry_points.py
+m01053,fixture,1,1,0,0,1,1406,2000,3406,3406,0,test_qualify_columns(1406ms),1,,| data tests/fixtures/optimizer/qualify_columns.sql
+m01054,code,0,0,0,0,0,0,0,0,0,0,,0,,| sqlglot/anonymize.py:125 runtime[stmt] -> 0
+m01056,code+code,20,18,2,0,2,21454,4000,25454,25454,0,test_execute_tpcds(21454ms),1,,| sqlglot/optimizer/unnest_subqueries.py:382 runtime[header] -> 9 ; sqlglot/diff.py:476 runtime[stmt] -> 11
+m01057,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+m01059,code,94,5,89,0,2,21454,4000,25454,25454,0,test_execute_tpcds(21454ms),1,,| sqlglot/optimizer/optimize_joins.py:148 runtime[stmt] -> 94
+m01060,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+m01061,code,1,1,0,0,1,6,2000,2006,2006,0,test_tableau(6ms),1,,| sqlglot/generators/tableau.py:40 runtime[stmt] -> 1
+m01063,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+m01064,test-file,1,1,0,0,1,5,2000,2005,2005,0,test_ilike(5ms),1,,| test file tests/dialects/test_drill.py
+m01066,fixture,1,1,0,0,1,83,2000,2083,2083,0,test_pushdown_predicates(83ms),1,,| data tests/fixtures/optimizer/pushdown_predicates.sql
+m01067,fixture,1,1,0,0,1,21,2000,2021,2021,0,test_eliminate_subqueries(21ms),1,,| data tests/fixtures/optimizer/eliminate_subqueries.sql
+m01069,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+m01070,delete-stmt,94,94,0,0,2,21454,4000,25454,25454,0,test_execute_tpcds(21454ms),1,,| sqlglot/optimizer/optimizer.py:108 runtime[stmt] -> 94
+m01071,comment,0,0,0,0,0,0,0,0,0,0,,0,,| sqlglot/generators/starrocks.py:21 runtime[stmt] -> 0
+m01073,delete-stmt,16,16,0,0,1,17,2000,2017,2017,0,test_show_tables(2ms),1,,| sqlglot/generators/snowflake.py:857 runtime[stmt] -> 16
+m01074,fixture,1,1,0,0,1,68,2000,2068,2068,0,test_normalize_identifiers(68ms),1,,| data tests/fixtures/optimizer/normalize_identifiers.sql
+m01075,delete-stmt,212,212,0,0,2,21454,4000,25454,25454,0,test_execute_tpcds(21454ms),1,,| sqlglot/optimizer/qualify_columns.py:767 runtime[stmt] -> 212
+m01077,test-file+delete-stmt,1,1,0,0,1,156,2000,2156,2156,0,test_postgres(156ms),1,,| test file tests/dialects/test_postgres.py ; sqlglot/optimizer/eliminate_joins.py:108 runtime[stmt] -> 0
+m01082,test-file,1,1,0,0,1,0,2000,2000,2000,0,test_name_sequence(0ms),1,,| test file tests/test_helper.py
+m01083,fixture,1,1,0,0,1,1406,2000,3406,3406,0,test_qualify_columns(1406ms),1,,| data tests/fixtures/optimizer/qualify_columns.sql
+m01090,fixture,1,1,0,0,1,8,2000,2008,2008,0,test_isolate_table_selects(8ms),1,,| data tests/fixtures/optimizer/isolate_table_selects.sql
+m01092,code,1,1,0,0,1,17,2000,2017,2017,0,test_prql(17ms),1,,| sqlglot/parsers/prql.py:120 runtime[stmt] -> 1
+m01094,delete-stmt,1,1,0,0,1,27,2000,2027,2027,0,test_time(27ms),1,,| sqlglot/parsers/presto.py:55 runtime[stmt] -> 1
+m01095,fixture,1,1,0,0,1,47,2000,2047,2047,0,test_pretty(47ms),1,,| data tests/fixtures/pretty.sql
+m01096,code,1,1,0,0,1,34,2000,2034,2034,0,test_ddl(34ms),1,,| sqlglot/parsers/spark2.py:143 runtime[header] -> 1
+m01098,delete-stmt,2,2,0,0,1,713,2000,2713,2713,0,test_snowflake(662ms),1,,| sqlglot/generators/duckdb.py:187 runtime[stmt] -> 2
+m01100,fixture,1,1,0,0,1,90,2000,2090,2090,0,test_qualify_tables(90ms),1,,| data tests/fixtures/optimizer/qualify_tables.sql
+m01102,fixture,1,1,0,0,1,7,2000,2007,2007,0,test_pushdown_cte_alias_columns(7ms),1,,| data tests/fixtures/optimizer/pushdown_cte_alias_columns.sql
+m01103,code,2,2,0,0,1,15,2000,2015,2015,0,test_create_table_storage(8ms),1,,| sqlglot/generators/oracle.py:141 runtime[stmt] -> 2
+m01105,test-file,1,1,0,0,1,0,2000,2000,2000,0,test_crlf(0ms),1,,| test file tests/test_tokens.py
+m01106,fixture,1,1,0,0,1,47,2000,2047,2047,0,test_pretty(47ms),1,,| data tests/fixtures/pretty.sql
+m01107,fixture,1,1,0,0,1,9,2000,2009,2009,0,test_qualify_columns__with_invisible(9ms),1,,| data tests/fixtures/optimizer/qualify_columns__with_invisible.sql
+m01110,fixture,1,1,0,0,1,1406,2000,3406,3406,0,test_qualify_columns(1406ms),1,,| data tests/fixtures/optimizer/qualify_columns_ddl.sql
+m01111,code,0,0,0,0,0,0,0,0,0,0,,0,,| sqlglot/optimizer/normalize_identifiers.py:25 runtime[stmt] -> 0
+m01113,code,1,1,0,0,1,213,2000,2213,2213,0,test_canonicalize_internal_names(213ms),1,,| sqlglot/optimizer/canonicalize_internal_names.py:209 runtime[stmt] -> 1
+m01115,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+m01116,code,0,0,0,0,0,0,0,0,0,0,,0,,| sqlglot/expressions/ddl.py:36 runtime[stmt] -> 0
+m01117,fixture,1,1,0,0,1,61,2000,2061,2061,0,test_annotate_types(61ms),1,,| data tests/fixtures/optimizer/annotate_types.sql
+m01119,fixture,1,1,0,0,1,395,2000,2395,2395,0,test_optimize(395ms),1,,| data tests/fixtures/optimizer/optimizer.sql

@@ -168,6 +168,22 @@ def main() -> int:
 
     # Definition-time edits must leave their modules importable; otherwise every
     # importer fails, which the static rules cannot bound: select everything.
+    # Commits that will be verified get their import check inside the
+    # verification child; everything else is checked on its own first.
+    planned = {}
+    if VERIFY and analyses:
+        try:
+            planned = plan_all(analyses, tests_by_num, dur)
+        except Exception as e:  # noqa: BLE001
+            log(f"planning aborted: {type(e).__name__}: {e}")
+            planned = {}
+    # stdout must hold exactly one line per commit, so answers are printed once,
+    # at the end. Verification only refines them.
+    if planned:
+        try:
+            verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full)
+        except Exception as e:  # noqa: BLE001
+            log(f"verification aborted: {type(e).__name__}: {e}")
     try:
         check_imports(analyses, results, full, t0)
     except Exception as e:  # noqa: BLE001
@@ -176,14 +192,6 @@ def main() -> int:
             if a.import_check and not getattr(a, "import_ok", False):
                 a.everything = True
                 results[cid] = full
-
-    # stdout must hold exactly one line per commit, so answers are printed once,
-    # at the end. Verification only refines them.
-    if VERIFY and analyses:
-        try:
-            verify_all(analyses, results, tests_by_num, dur, n, t0)
-        except Exception as e:  # noqa: BLE001
-            log(f"verification aborted: {type(e).__name__}: {e}")
 
     out = sys.stdout
     for p in patches:
@@ -198,7 +206,7 @@ def check_imports(analyses, results, full, t0) -> None:
     import verify
 
     for cid, a in analyses.items():
-        if a.everything or not a.import_check:
+        if a.everything or not a.import_check or getattr(a, "import_ok", False):
             continue
         tc = time.monotonic()
         report = verify.import_check(SRC, a.new_files, a.import_check)
@@ -211,17 +219,21 @@ def check_imports(analyses, results, full, t0) -> None:
             log(f"{cid}: patched modules import ok ({time.monotonic() - tc:.2f}s): {sorted(a.import_check)}")
 
 
-def verify_all(analyses, results, tests_by_num, dur, n, t0) -> None:
-    import verify
-
-    plans = []
+def plan_all(analyses, tests_by_num, dur) -> dict:
+    out = {}
     for cid, a in analyses.items():
         plan = plan_verification(a, tests_by_num, dur)
         if plan:
-            plans.append((plan["gain"], cid, plan))
+            out[cid] = plan
+    return out
+
+
+def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> None:
+    import verify
+
+    plans = sorted(((plan["gain"], cid, plan) for cid, plan in planned.items()), key=lambda x: -x[0])
     if not plans:
         return
-    plans.sort(key=lambda x: -x[0])
     # Wall budget: the run limit is 3 min for the practice batch (~40 commits) and
     # 4.5 min for the final (~60). Stay well inside: ~1.6 s of wall per commit.
     budget_end = t0 + min(150.0, max(20.0, 1.6 * n))
@@ -245,7 +257,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0) -> None:
             a = analyses[cid]
             nodeids = [tests_by_num[x]["id"] for x in plan["cands"]]
             timeout = min(remaining, max(8.0, 4 * plan["cpu"] + 5))
-            job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout)
+            job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout, sorted(a.import_check))
             meta[cid] = plan
             jobs.append(job)
         if not jobs:
@@ -259,6 +271,12 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0) -> None:
                 log(f"{cid}: verify FAILED ({report.get('error') if report else 'timeout/crash'}) "
                     f"after {wall:.2f}s -> static")
                 continue
+            if a_import_errors := report.get("import_errors"):
+                analyses[cid].everything = True
+                results[cid] = full
+                log(f"{cid}: patched import FAILED in verification {a_import_errors} -> everything")
+                continue
+            analyses[cid].import_ok = True
             failed_ids = set(report["failed"])
             seen = set(report["seen"])
             id2num = {tests_by_num[x]["id"]: x for x in plan["cands"]}

@@ -220,7 +220,11 @@ class StaticSelector:
 
     # ------------------------------------------------------------------
     def _sqlglot_py(self, rel: str, old: bytes, new: bytes, a: Analysis) -> None:
-        res = diff_python(old, new)
+        try:
+            old_tree = self._old_tree(old)
+        except SyntaxError:
+            old_tree = None
+        res = diff_python(old, new, old_tree)
         if res.syntax_error:
             a.syntax_error = True
             a.reasons.append(f"syntax error in {rel}")
@@ -272,6 +276,15 @@ class StaticSelector:
             elif isinstance(fact, Definition):
                 self._definition(mod, rel, fact.scope, fact.names, a)
 
+    def _old_tree(self, src: bytes):
+        cache = getattr(self, "_tree_cache", None)
+        if cache is None:
+            cache = self._tree_cache = {}
+        key = hash(src)
+        if key not in cache:
+            cache[key] = ast.parse(src)
+        return cache[key]
+
     def _ran_at_import(self, rel: str, src: bytes, lines: set[int], imp: set[int]) -> bool:
         """Did any function/lambda enclosing these lines run while modules were imported?"""
         if not (lines & imp):
@@ -281,7 +294,7 @@ class StaticSelector:
         # Only the innermost code object containing each changed line matters: an
         # outer factory running at import merely creates a closure over the
         # (patched) inner code, whose effects show up when tests call it.
-        tree = ast.parse(src)
+        tree = self._old_tree(src)
         innermost: dict[int, tuple] = {}  # line -> (span, qualname, first-line candidates)
 
         def visit(node, qual: str, parent_is_func: bool):
@@ -310,7 +323,7 @@ class StaticSelector:
                    for _, q, firsts in innermost.values())
 
     def _enclosing_functions(self, src: bytes, lines: set[int]) -> set[str]:
-        tree = ast.parse(src)
+        tree = self._old_tree(src)
         names: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

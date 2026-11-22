@@ -1,0 +1,31 @@
+commit,kind_debug,selected,failing,extra,miss,workers,busiest_ms,overhead_ms,cost_ms,oracle_ms,gap_ms,heaviest,heaviest_fails,verified,reason
+2haz,code,86,0,86,0,2,21454,4000,25454,0,25454,test_execute_tpcds(21454ms),0,,| sqlglot/dialects/dialect.py:1278 runtime[stmt] -> 86
+66ks,code,51,0,51,0,1,22787,2000,24787,0,24787,test_execute_tpcds(21454ms),0,,| sqlglot/executor/context.py:53 runtime[header] -> 51
+4d63,code,816,0,816,0,4,6340,8000,14340,0,14340,test_scope(2533ms),0,,| sqlglot.dialects.snowflake:Snowflake.Tokenizer.['NUMERIC_ESCAPES'] users(import_read=True) -> 816
+2qn5,code,6,0,6,0,1,536,2000,2536,0,2536,test_duckdb(287ms),0,,| sqlglot/generators/clickhouse.py:811 runtime[header] -> 6
+5y72,code,3,0,3,0,1,466,2000,2466,0,2466,test_optimize(395ms),0,,| sqlglot/optimizer/eliminate_subqueries.py:176 runtime[stmt] -> 3
+fryt,code,3,0,3,0,1,157,2000,2157,0,2157,test_time(155ms),0,,| sqlglot/parsers/dremio.py:39 runtime[header] -> 3
+ktz3,code,3,0,3,0,1,78,2000,2078,0,2078,test_ddl(54ms),0,,| sqlglot.expressions.ddl:TriggerProperties.['arg_types'] users(import_read=True) -> 3
+gbav,code,1,0,1,0,1,4,2000,2004,0,2004,test_show(4ms),0,,| sqlglot.parsers.singlestore:SingleStoreParser.['SHOW_PARSERS'] users&readers -> 1
+535z,code,7,1,6,0,1,855,2000,2855,2596,259,test_simplify(596ms),1,,| sqlglot.dialects.tsql:TSQL.['WEEK_OFFSET'] users&readers -> 7
+bj7g,code,2,1,1,0,1,241,2000,2241,2011,230,test_clickhouse(230ms),0,,| sqlglot/generators/clickhouse.py:791 runtime[stmt] -> 2
+986c,multi,2,1,1,0,1,340,2000,2340,2329,11,test_unnest_subqueries(329ms),1,,| data tests/fixtures/optimizer/unnest_subqueries.sql
+rszg,multi,4,3,1,0,1,3775,2000,5775,5764,11,test_annotate_funcs(1963ms),1,,| sqlglot/typing/snowflake.py:98 runtime[header] -> 2 ; data tests/fixtures/optimizer/qualify_columns_ddl.sql
+2jrq,code,29,8,21,0,2,21454,4000,25454,25454,0,test_execute_tpcds(21454ms),1,,| sqlglot/optimizer/eliminate_joins.py:63 runtime[stmt] -> 29
+2vdj,fixture,1,1,0,0,1,83,2000,2083,2083,0,test_pushdown_predicates(83ms),1,,| data tests/fixtures/optimizer/pushdown_predicates.sql
+3utz,code,37,37,0,0,2,21454,4000,25454,25454,0,test_execute_tpcds(21454ms),1,,| sqlglot/serde.py:53 runtime[header] -> 37
+6vvp,fixture,1,1,0,0,1,37,2000,2037,2037,0,test_qualify_columns__invalid(37ms),1,,| data tests/fixtures/optimizer/qualify_columns__invalid.sql
+6ze8,code,1,1,0,0,1,1,2000,2001,2001,0,test_regexp_split(1ms),1,,| sqlglot/parsers/dremio.py:111 runtime[lambda-body] -> 1
+8y7j,code,0,0,0,0,0,0,0,0,0,0,,0,,| sqlglot/generators/clickhouse.py:55 runtime[header] -> 0
+9u5k,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+ary6,code,10,10,0,0,1,2382,2000,4382,4382,0,test_qualify_columns(1406ms),1,,| sqlglot/parsers/bigquery.py:500 runtime[header] -> 10
+bap8,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+bvw2,multi,1,1,0,0,1,61,2000,2061,2061,0,test_annotate_types(61ms),1,,| data tests/fixtures/optimizer/annotate_types.sql
+egys,fixture,1,1,0,0,1,596,2000,2596,2596,0,test_simplify(596ms),1,,| data tests/fixtures/optimizer/simplify.sql
+f4bn,fixture,1,1,0,0,1,7,2000,2007,2007,0,test_pushdown_cte_alias_columns(7ms),1,,| data tests/fixtures/optimizer/pushdown_cte_alias_columns.sql
+f4xa,comment,0,0,0,0,0,0,0,0,0,0,,0,,| 
+gbhk,fixture,1,1,0,0,1,61,2000,2061,2061,0,test_annotate_types(61ms),1,,| data tests/fixtures/optimizer/annotate_types.sql
+j6uz,code,2,2,0,0,1,2399,2000,4399,4399,0,test_annotate_funcs(1963ms),1,,| sqlglot/parsers/bigquery.py:650 runtime[header] -> 2
+mthh,fixture,1,1,0,0,1,1016,2000,3016,3016,0,test_merge_subqueries(1016ms),1,,| data tests/fixtures/optimizer/merge_subqueries.sql
+nwnx,fixture,1,1,0,0,1,92,2000,2092,2092,0,test_pushdown_projection(92ms),1,,| data tests/fixtures/optimizer/pushdown_projections.sql
+st8f,fixture,1,1,0,0,1,8,2000,2008,2008,0,test_isolate_table_selects(8ms),1,,| data tests/fixtures/optimizer/isolate_table_selects.sql
