@@ -245,6 +245,21 @@ def main() -> int:
                 a.everything = True
                 results[cid] = full
 
+    # MEASUREMENT PROBE ONLY (branch probe-heavy, never the final): drop the three
+    # heaviest tests everywhere so the practice board's aggregate tells us how much
+    # they cost (saved = base + 300*misses - simulated) and how many commits need them.
+    if os.environ.get("BR_PROBE_DROP_HEAVY") == "1":
+        heavy_ids = {"tests/test_executor.py::TestExecutor::test_execute_tpcds",
+                     "tests/test_parser.py::TestParser::test_max_nodes",
+                     "tests/test_generator.py::TestGenerator::test_generator_memory"}
+        heavy = {t["number"] for t in tests if t["id"] in heavy_ids}
+        for cid, ws in list(results.items()):
+            sel = {x for w in ws for x in w}
+            if sel & heavy:
+                results[cid] = partition(sel - heavy, dur)
+        full = partition({t["number"] for t in tests} - heavy, dur)
+        log(f"PROBE: dropped {len(heavy)} heavy tests from every commit")
+
     out = sys.stdout
     for p in patches:
         out.write(json.dumps({"commit": p.stem, "workers": results.get(p.stem, full)}) + "\n")
