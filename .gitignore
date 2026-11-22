@@ -1,0 +1,5 @@
+work/
+*.tar.gz
+__pycache__/
+output.jsonl
+*.pyc

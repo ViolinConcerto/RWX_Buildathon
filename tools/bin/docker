@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# WSL shim: forward to Docker Desktop's Windows client, translating absolute
+# Linux paths in -v/--volume host sides to \\wsl.localhost\... form.
+D="/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"
+args=(); next_is_vol=0
+for a in "$@"; do
+  if [[ $next_is_vol == 1 ]]; then
+    host="${a%%:*}"; rest="${a#*:}"
+    if [[ $host == /* ]]; then a="$(wslpath -w "$host"):$rest"; fi
+    next_is_vol=0
+  elif [[ $a == -v || $a == --volume ]]; then next_is_vol=1
+  fi
+  args+=("$a")
+done
+exec "$D" "${args[@]}"
