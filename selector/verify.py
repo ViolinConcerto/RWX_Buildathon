@@ -29,19 +29,18 @@ import sys
 import time
 
 
-def preload() -> None:
+def preload(heavy: bool = True) -> None:
     """Import what every child needs but that does not depend on the patch."""
     import builtins  # noqa: F401
     import unittest  # noqa: F401
     import unittest.mock  # noqa: F401
 
-    import pytest  # noqa: F401
-    import _pytest.unittest  # noqa: F401
-    import _pytest.python  # noqa: F401
-    import _pytest.terminal  # noqa: F401
-
-    for mod in ("pytest_timeout", "duckdb", "numpy", "pandas", "gzip", "csv", "tracemalloc",
-                "multiprocessing", "concurrent.futures.process", "decimal", "datetime"):
+    mods = ["gzip", "csv", "tracemalloc", "multiprocessing", "concurrent.futures.process", "decimal", "datetime"]
+    if os.environ.get("BR_RUNNER") == "pytest":
+        mods += ["pytest", "_pytest.unittest", "_pytest.python", "_pytest.terminal", "pytest_timeout"]
+    if heavy:
+        mods += ["duckdb", "numpy", "pandas"]
+    for mod in mods:
         try:
             importlib.import_module(mod)
         except Exception:  # noqa: BLE001
@@ -182,15 +181,18 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
     os.chdir(src_root)
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
 
-    import pytest
-
-    plugin = _OutcomePlugin()
-    args = ["-q", "-p", "no:cacheprovider", "-p", "no:xdist", "-p", "no:randomly", "--assert=plain",
-            "-o", "addopts=", f"--timeout={max(5, int(timeout_s))}", "--rootdir", src_root, *nodeids]
     try:
-        pytest.main(args, plugins=[plugin])
-        report = {"ok": True, "failed": sorted(plugin.failed), "seen": sorted(plugin.seen),
-                  "collect_errors": plugin.collect_errors}
+        if os.environ.get("BR_RUNNER") == "pytest":
+            import pytest
+
+            plugin = _OutcomePlugin()
+            args = ["-q", "-p", "no:cacheprovider", "-p", "no:xdist", "-p", "no:randomly", "--assert=plain",
+                    "-o", "addopts=", f"--timeout={max(5, int(timeout_s))}", "--rootdir", src_root, *nodeids]
+            pytest.main(args, plugins=[plugin])
+            report = {"ok": True, "failed": sorted(plugin.failed), "seen": sorted(plugin.seen),
+                      "collect_errors": plugin.collect_errors}
+        else:
+            report = run_unittest(nodeids)
     except BaseException as e:  # noqa: BLE001
         report = {"ok": False, "error": repr(e)}
     data = json.dumps(report).encode()
@@ -199,6 +201,94 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
         n = os.write(wfd, view)
         view = view[n:]
     os.close(wfd)
+
+
+def run_unittest(nodeids: list[str]) -> dict:
+    """Run pytest-style node ids (file::Class::method) with plain unittest.
+
+    Outcome rules match how the labels were produced with pytest: a test fails
+    if it errors, fails, has a failing subtest or unexpectedly succeeds, or if
+    its class/module fixture fails, or its module cannot be imported. Skips and
+    expected failures pass.
+    """
+    import unittest
+
+    failed: set[str] = set()
+    seen: set[str] = set()
+    collect_errors: list[str] = []
+    by_uid: dict[str, str] = {}
+    by_class: dict[str, list[str]] = {}
+    by_module: dict[str, list[str]] = {}
+    suite = unittest.TestSuite()
+    modules: dict[str, object] = {}
+    for nid in nodeids:
+        parts = nid.split("::")
+        if len(parts) != 3:
+            failed.add(nid)
+            continue
+        path, cname, meth = parts
+        modname = path[:-3].replace("/", ".")
+        if modname not in modules:
+            try:
+                modules[modname] = importlib.import_module(modname)
+            except BaseException:  # noqa: BLE001
+                modules[modname] = None
+                collect_errors.append(path)
+        mod = modules[modname]
+        if mod is None:
+            failed.add(nid)
+            continue
+        cls = getattr(mod, cname, None)
+        if cls is None or not hasattr(cls, meth):
+            failed.add(nid)
+            continue
+        test = cls(meth)
+        by_uid[test.id()] = nid
+        by_class.setdefault(f"{cls.__module__}.{cls.__qualname__}", []).append(nid)
+        by_module.setdefault(cls.__module__, []).append(nid)
+        suite.addTest(test)
+
+    def mark(test) -> None:
+        nid = by_uid.get(test.id()) if hasattr(test, "id") else None
+        if nid is not None:
+            failed.add(nid)
+            return
+        # _ErrorHolder for setUpClass / tearDownClass / setUpModule failures
+        desc = str(getattr(test, "description", test))
+        hit = False
+        for key, nids in list(by_class.items()) + list(by_module.items()):
+            if f"({key})" in desc or desc.endswith(key):
+                failed.update(nids)
+                hit = True
+        if not hit:
+            failed.update(nodeids)  # unattributable fixture error: be conservative
+
+    class Result(unittest.TestResult):
+        def startTest(self, test):
+            super().startTest(test)
+            nid = by_uid.get(test.id())
+            if nid:
+                seen.add(nid)
+
+        def addError(self, test, err):
+            super().addError(test, err)
+            mark(test)
+
+        def addFailure(self, test, err):
+            super().addFailure(test, err)
+            mark(test)
+
+        def addSubTest(self, test, subtest, err):
+            super().addSubTest(test, subtest, err)
+            if err is not None:
+                mark(test)
+
+        def addUnexpectedSuccess(self, test):
+            super().addUnexpectedSuccess(test)
+            mark(test)
+
+    suite.run(Result())
+    return {"ok": True, "failed": sorted(failed), "seen": sorted(seen), "collect_errors": collect_errors}
 
 
 class Job:

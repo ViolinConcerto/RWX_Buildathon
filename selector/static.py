@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 
 from patchlib import FileChange, PatchError, apply_change, parse_patch
+from equiv import proven_equivalent
 from pydiff import Broad, ClassHeader, Definition, Runtime, diff_python
 
 
@@ -30,6 +31,10 @@ class Analysis:
     # Modules whose definition-time code changed: the caller must check they
     # still import (a removed name, a failing metaclass... breaks every importer).
     import_check: set[str] = field(default_factory=set)
+    # Unproven runtime edits (rel -> old-file lines) and whether anything else
+    # (definition-time, data, test code, fallbacks) contributed candidates.
+    runtime_lines: dict[str, set[int]] = field(default_factory=dict)
+    other_facts: bool = False
 
 
 class DepMap:
@@ -51,6 +56,13 @@ class DepMap:
         self.ident_import = set(raw["ident_import"])
         self.class_refs = raw.get("class_refs", {})
         self.module_refs = raw.get("module_refs", {})
+        # Code objects (rel, co_qualname, co_firstlineno) that ran while importing
+        # every sqlglot module (tools/mapgen/import_closure.py); None if unavailable.
+        self.import_called = None
+        called = os.path.join(os.path.dirname(path), "import_called.json")
+        if os.path.exists(called):
+            with open(called) as f:
+                self.import_called = {tuple(x) for x in json.load(f)}
 
     def tests_of(self, sid: int | None) -> frozenset[int]:
         if sid is None:
@@ -96,10 +108,11 @@ def module_name(rel: str) -> str:
 
 
 class StaticSelector:
-    def __init__(self, depmap: DepMap, src_root: str, tests: list[dict]):
+    def __init__(self, depmap: DepMap, src_root: str, tests: list[dict], cmp_profile=None):
         self.map = depmap
         self.src = src_root
         self.tests = tests
+        self.cmp_profile = cmp_profile
         self.all = {t["number"] for t in tests}
         self.by_file: dict[str, set[int]] = {}
         for t in tests:
@@ -171,6 +184,7 @@ class StaticSelector:
 
         if (old_rel is None or new_rel is None or old_rel != new_rel) and not self._is_inert_path(ch.path):
             # Files appearing/disappearing: directory listings + importers.
+            a.other_facts = True
             for rel in ch.touched_paths():
                 a.candidates |= self.map.dir_readers(os.path.dirname(rel))
             if ch.path.endswith(".py") and (ch.path.startswith("sqlglot/") or ch.path.startswith("tests/")):
@@ -185,6 +199,8 @@ class StaticSelector:
             return
 
         rel = new_rel
+        if not (rel.endswith(".py") and rel.startswith("sqlglot/")):
+            a.other_facts = True
         if rel.endswith(".py") and rel.startswith("sqlglot/"):
             a.python_changed = True
             self._sqlglot_py(rel, old, new, a)
@@ -224,9 +240,20 @@ class StaticSelector:
                 a.reasons.append(f"{rel}: {fact.reason}")
                 return
             if isinstance(fact, Runtime):
+                # The type profile also covers import-time executions (every module
+                # was loaded through the instrumented importer), so proofs hold there too.
+                if fact.old is not None:
+                    ok, why = proven_equivalent(self.cmp_profile, rel, fact.old, fact.new)
+                    if ok:
+                        a.reasons.append(f"{rel}:{min(fact.lines)} proven equivalent ({why})")
+                        continue
+                    if "swap" in why or "profiled" in why or "provable" in why:
+                        a.reasons.append(f"{rel}:{min(fact.lines)} equivalence not proven: {why}")
                 tests = self.map.line_tests(rel, fact.lines)
                 a.candidates |= tests
-                if fact.lines & imp:
+                a.runtime_lines.setdefault(rel, set()).update(fact.lines)
+                if self._ran_at_import(rel, old, fact.lines, imp):
+                    a.other_facts = True
                     # Code that runs at import time (class creation helpers, metaclasses).
                     names = self._enclosing_functions(old, fact.lines)
                     a.reasons.append(f"{rel}:{min(fact.lines)} import-time code in {sorted(names)}")
@@ -236,6 +263,7 @@ class StaticSelector:
                     a.reasons.append(f"{rel}:{min(fact.lines)} runtime[{fact.note}] -> {len(tests)}")
             elif isinstance(fact, ClassHeader):
                 a.import_check.add(mod)
+                a.other_facts = True
                 key = f"{mod}:{'.'.join(fact.scope)}"
                 users = self.map.class_users(key)
                 a.candidates |= users
@@ -243,6 +271,43 @@ class StaticSelector:
                 self._definition(mod, rel, fact.scope[:-1], {fact.scope[-1]}, a)
             elif isinstance(fact, Definition):
                 self._definition(mod, rel, fact.scope, fact.names, a)
+
+    def _ran_at_import(self, rel: str, src: bytes, lines: set[int], imp: set[int]) -> bool:
+        """Did any function/lambda enclosing these lines run while modules were imported?"""
+        if not (lines & imp):
+            return False  # the changed lines never executed during import
+        if self.map.import_called is None:
+            return True  # line-level approximation
+        # Only the innermost code object containing each changed line matters: an
+        # outer factory running at import merely creates a closure over the
+        # (patched) inner code, whose effects show up when tests call it.
+        tree = ast.parse(src)
+        innermost: dict[int, tuple] = {}  # line -> (span, qualname, first-line candidates)
+
+        def visit(node, qual: str, parent_is_func: bool):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    name = "<lambda>" if isinstance(child, ast.Lambda) else child.name
+                    q = f"{qual}.<locals>.{name}" if parent_is_func else (f"{qual}.{name}" if qual else name)
+                    lo, hi = child.lineno, child.end_lineno or child.lineno
+                    firsts = {child.lineno}
+                    if not isinstance(child, ast.Lambda) and child.decorator_list:
+                        firsts.add(min(d.lineno for d in child.decorator_list))
+                    for ln in lines:
+                        if lo <= ln <= hi:
+                            prev = innermost.get(ln)
+                            if prev is None or hi - lo <= prev[0]:
+                                innermost[ln] = (hi - lo, q, firsts)
+                    visit(child, q, True)
+                elif isinstance(child, ast.ClassDef):
+                    q = f"{qual}.<locals>.{child.name}" if parent_is_func else (f"{qual}.{child.name}" if qual else child.name)
+                    visit(child, q, False)
+                else:
+                    visit(child, qual, parent_is_func)
+
+        visit(tree, "", False)
+        return any(any((rel, q, f) in self.map.import_called for f in firsts)
+                   for _, q, firsts in innermost.values())
 
     def _enclosing_functions(self, src: bytes, lines: set[int]) -> set[str]:
         tree = ast.parse(src)
@@ -256,6 +321,7 @@ class StaticSelector:
     def _definition(self, mod: str, rel: str, scope, names: set[str], a: Analysis, via_import=False, depth=0) -> None:
         """A binding changed at definition time. Find who can observe it."""
         a.import_check.add(mod)
+        a.other_facts = True
         names = {n for n in names if n}
         if not names:
             a.everything = True

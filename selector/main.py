@@ -25,6 +25,7 @@ sys.path.insert(0, str(HERE))
 DATA = Path(os.environ.get("BR_DATA", "/data"))
 SRC = os.path.abspath(os.environ.get("BR_SRC", "/opt/sqlglot"))
 MAP = os.environ.get("BR_MAP", str(HERE.parent / "maps" / "depmap.json.gz"))
+CMP_PROFILE = os.environ.get("BR_CMP", str(HERE.parent / "maps" / "cmp_profile.json.gz"))
 TMP = os.environ.get("BR_TMP", "/tmp/br")
 VERIFY = os.environ.get("BR_VERIFY", "1") == "1"
 PARALLEL = int(os.environ.get("BR_PARALLEL", "2"))
@@ -32,12 +33,22 @@ WORKER_COST_MS = 2000
 MAX_WORKERS = 8
 
 # Prior probability that a commit of this shape breaks at least one candidate.
-P_BREAK = {"runtime": 0.55, "definition": 0.4, "data": 0.9, "test": 0.9, "readers-only": 0.1}
-CPU_FACTOR = 1.6        # our in-process run CPU vs recorded seconds
-PER_TEST_CPU = 0.004    # pytest bookkeeping per test
-BASE_OVERHEAD = 0.18    # fork + fresh sqlglot import + pytest session
-PER_FILE_OVERHEAD = 0.06
-HEAVY_FILES = {"tests/test_executor.py"}  # spawn-pool tests; never re-run here
+# Priors from the public sample's small-candidate commits (runtime 5/8, data 10/10,
+# definition 1/3), shrunk toward 0.5; see experiments/LOG.md (E6).
+P_BREAK = {"runtime": 0.65, "definition": 0.4, "data": 0.9, "test": 0.9, "readers-only": 0.1}
+# Runner CPU per recorded second, per test file, measured on the pinned commit.
+try:
+    CPU_FACTORS = json.loads((HERE.parent / "maps" / "cpu_factors.json").read_text())["factor"]
+except Exception:  # noqa: BLE001
+    CPU_FACTORS = {}
+CPU_FACTOR_DEFAULT = 1.6
+PER_TEST_CPU = 0.002    # unittest bookkeeping per test
+BASE_OVERHEAD = 0.13    # fork + fresh patched sqlglot import (measured 0.113 s)
+PER_FILE_OVERHEAD = 0.03
+# Class-fixture CPU paid once per verification that runs any test of the file
+# (measured: an executor test costs 2.0 s because setUpClass loads TPC-H/TPC-DS).
+FILE_SETUP_CPU = {"tests/test_executor.py": 1.9, "tests/test_optimizer.py": 0.1}
+MIN_GAIN = 0.15  # skip coin-flip verifications whose expected gain is within noise
 
 
 def log(*args) -> None:
@@ -98,16 +109,15 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
         return None  # added/removed files: listings would differ; keep static answer
     cands = sorted(a.candidates)
     files = {tests_by_num[n]["file"] for n in cands}
-    if files & HEAVY_FILES:
-        return None
     blind = cost_of(partition(cands, dur), dur) / 1000
-    cpu = BASE_OVERHEAD + PER_FILE_OVERHEAD * len(files) + sum(
-        CPU_FACTOR * tests_by_num[n]["seconds"] + PER_TEST_CPU for n in cands
+    cpu = BASE_OVERHEAD + PER_FILE_OVERHEAD * len(files) + sum(FILE_SETUP_CPU.get(f, 0.0) for f in files) + sum(
+        CPU_FACTORS.get(tests_by_num[n]["file"], CPU_FACTOR_DEFAULT) * tests_by_num[n]["seconds"] + PER_TEST_CPU
+        for n in cands
     )
     p = P_BREAK[category(a)]
     exp_fail_cost = min(blind, 2.0 + 0.3 * max(0.0, blind - 2.0))
     expected = cpu + p * exp_fail_cost
-    if expected >= blind:
+    if blind - expected < MIN_GAIN:
         return None
     return {"cands": cands, "blind": blind, "cpu": cpu, "gain": blind - expected}
 
@@ -128,7 +138,15 @@ def main() -> int:
         from static import DepMap, StaticSelector
 
         depmap = DepMap(MAP, tests)
-        selector = StaticSelector(depmap, SRC, tests)
+        profile = None
+        if os.path.exists(CMP_PROFILE):
+            try:
+                from equiv import CmpProfile
+
+                profile = CmpProfile(CMP_PROFILE)
+            except Exception as e:  # noqa: BLE001
+                log(f"comparison profile unavailable: {type(e).__name__}: {e}")
+        selector = StaticSelector(depmap, SRC, tests, profile)
         log(f"map loaded in {time.monotonic() - t0:.2f}s; {len(depmap.unmapped)} tests not in map")
     except Exception as e:  # noqa: BLE001
         log(f"FATAL map load: {type(e).__name__}: {e}; running everything")
@@ -208,7 +226,9 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0) -> None:
     # 4.5 min for the final (~60). Stay well inside: ~1.6 s of wall per commit.
     budget_end = t0 + min(150.0, max(20.0, 1.6 * n))
     tv = time.monotonic()
-    verify.preload()
+    heavy_users = sum(1 for _, _, plan in plans
+                      if any(tests_by_num[x]["file"] == "tests/test_optimizer.py" for x in plan["cands"]))
+    verify.preload(heavy=heavy_users >= 2)
     log(f"preload {time.monotonic() - tv:.2f}s; {len(plans)} commits to verify")
     os.makedirs(TMP, exist_ok=True)
     pending = list(plans)

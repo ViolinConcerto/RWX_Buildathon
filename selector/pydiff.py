@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 class Runtime:
     lines: set[int]
     note: str = ""
+    old: object = None  # original statement (for equivalence proofs), when localised to one
+    new: object = None
 
 
 @dataclass
@@ -279,7 +281,7 @@ class _Differ:
         if _is_compound(o):
             if _without_bodies(o) != _without_bodies(n):
                 if in_func:
-                    self.facts.append(Runtime(_header_span(o), "header"))
+                    self.facts.append(Runtime(_header_span(o), "header", o, n))
                 else:
                     self.changed_whole(o, scope, in_func, "compound-header")
                     return
@@ -314,7 +316,7 @@ class _Differ:
             return
         # Simple statement.
         if in_func:
-            self.facts.append(Runtime(_span(o), "stmt"))
+            self.facts.append(Runtime(_span(o), "stmt", o, n))
             return
         diffs: list = []
         _expr_diffs(o, n, False, diffs)
