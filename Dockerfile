@@ -23,6 +23,11 @@ RUN SKIP_INTEGRATION=0 PYTHONPATH=/opt/sqlglot python /app/build_tpc_store.py /o
 COPY selector/statefp.py /app/statefp_build.py
 RUN PYTHONPATH=/opt/sqlglot python /app/statefp_build.py /opt/sqlglot /opt/statefp.json && chmod a+r /opt/statefp.json
 
+# Pinned-commit plan fingerprints + duckdb texts of the TPC-DS fixture queries (two-stage check).
+COPY selector/tpcplan.py /app/tpcplan_build.py
+RUN SKIP_INTEGRATION=0 PYTHONPATH=/opt/sqlglot python /app/tpcplan_build.py /opt/sqlglot /opt/tpcstore/plans.json \
+ && chmod a+r /opt/tpcstore/plans.json
+
 COPY selector /app/selector
 COPY maps /app/maps
 RUN chmod -R a+rX /app && python -m compileall -q /app/selector

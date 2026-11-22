@@ -71,6 +71,41 @@ class InlinePickleExecutor(concurrent.futures.Executor):
         pass
 
 
+class _LazyFuture(concurrent.futures.Future):
+    """Runs its work when the result is first asked for (pickling like a pool would)."""
+
+    def __init__(self, ex, fn, args, kwargs):
+        super().__init__()
+        self._call = (ex, fn, args, kwargs)
+
+    def result(self, timeout=None):
+        if self._call is not None:
+            ex, fn, args, kwargs = self._call
+            self._call = None
+            try:
+                ex._ensure_init()
+                fn2, a2, k2 = pickle.loads(pickle.dumps((fn, args, kwargs)))
+                self.set_result(pickle.loads(pickle.dumps(fn2(*a2, **k2))))
+            except BaseException as error:  # noqa: BLE001
+                self.set_exception(error)
+        return super().result(timeout)
+
+
+class LazyPickleExecutor(InlinePickleExecutor):
+    """For the executor tests only (they read futures one by one with .result()): a
+    sub-case's query runs when the test reaches it, so a test that stops at its first
+    failing sub-case does not execute the remaining queries."""
+
+    def _ensure_init(self):
+        if not self._initialized:
+            self._initialized = True
+            init, iargs = pickle.loads(pickle.dumps(self._init))
+            init(*iargs)
+
+    def submit(self, fn, /, *args, **kwargs):
+        return _LazyFuture(self, fn, args, kwargs)
+
+
 class _PatchedLoader(importlib.machinery.SourceFileLoader):
     def __init__(self, fullname, path, source: bytes):
         super().__init__(fullname, path)
@@ -225,7 +260,7 @@ def _install_tpcds_subset(indices: list[int]) -> None:
     te = importlib.import_module("tests.test_executor")
     cls = te.TestExecutor
     original = cls.setUpClass.__func__
-    keep = sorted(set(indices))
+    keep = list(dict.fromkeys(indices))  # caller's order (cheapest first)
 
     def setUpClass(klass):
         original(klass)
@@ -296,7 +331,7 @@ def _max_nodes_proxy(limit_s: float = 6.0) -> tuple[str, float]:
 
 def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], nodeids: list[str],
            timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None, stop_on_fail=False,
-           proxy=False, entry_filter=None) -> None:
+           proxy=False, two_stage=None, entry_filter=None, conditional=False) -> None:
     # The selector's own heap (dependency map, cached ASTs) is inherited by the
     # fork; freeze it so tests that call gc.collect() do not traverse it.
     import gc
@@ -366,7 +401,33 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             _install_tpc_store()
         except BaseException as e:  # noqa: BLE001
             import_errors["tests.test_executor"] = f"{type(e).__name__}: {e}"[:300]
-    if not import_errors and tpcds_indices is not None:
+    stage_report, proven_pass = None, []
+    tpcds_id = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+    if not import_errors and two_stage is not None and tpcds_id in nodeids and not conditional:
+        try:
+            import tpcplan
+
+            with open(os.path.join(TPC_STORE, "plans.json")) as f:
+                base = json.load(f)
+            changed = tpcplan.stage1(two_stage["front"], base)
+            cost = two_stage.get("cost", {})
+            stage2 = sorted(set(two_stage["data"]) | set(changed), key=lambda i: (cost.get(str(i), 0.0), i))
+            stage_report = {"front": len(two_stage["front"]), "changed": len(changed), "stage2": len(stage2)}
+            if not stage2:
+                nodeids = [n for n in nodeids if n != tpcds_id]
+                proven_pass = [tpcds_id]
+            else:
+                tpcds_indices = stage2
+        except BaseException as e:  # noqa: BLE001
+            stage_report = {"error": repr(e)[:200]}  # fall back to the subset below / whole test
+            if tpcds_indices is None:
+                tpcds_indices = None
+    if not import_errors and any(n.startswith("tests/test_executor.py::") for n in nodeids):
+        try:
+            importlib.import_module("tests.test_executor").ProcessPoolExecutor = LazyPickleExecutor
+        except BaseException as e:  # noqa: BLE001
+            import_errors["tests.test_executor"] = f"{type(e).__name__}: {e}"[:300]
+    if not import_errors and tpcds_indices is not None and tpcds_id in nodeids:
         try:
             _install_tpcds_subset(tpcds_indices)
         except BaseException as e:  # noqa: BLE001
@@ -393,17 +454,90 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             pytest.main(args, plugins=[plugin])
             report = {"ok": True, "failed": sorted(plugin.failed), "seen": sorted(plugin.seen),
                       "collect_errors": plugin.collect_errors}
+        elif conditional and two_stage is not None and tpcds_id in nodeids:
+            report = _run_conditional(nodeids, entry_filter or {}, two_stage, tpcds_id)
+            proven_pass, stage_report = report.pop("proven_pass"), report.pop("tpcds_stage")
         else:
             report = run_unittest(nodeids, stop_on_fail, entry_filter or {})
     except BaseException as e:  # noqa: BLE001
         report = {"ok": False, "error": repr(e)}
     report["proxy"] = proxy_report
+    report["proven_pass"] = proven_pass
+    report["tpcds_stage"] = stage_report
     data = json.dumps(report).encode()
     view = memoryview(data)
     while view:
         n = os.write(wfd, view)
         view = view[n:]
     os.close(wfd)
+
+
+def _isolated_run(nodeids, stop_on_fail, entry_filter) -> dict:
+    """run_unittest, restoring the unittest.TestCase methods it replaces (several runs
+    in one child)."""
+    import unittest
+
+    names = ("assertMultiLineEqual", "assertDictEqual", "assertListEqual", "assertTupleEqual",
+             "assertSequenceEqual", "assertSetEqual", "subTest")
+    saved = {k: unittest.TestCase.__dict__[k] for k in names if k in unittest.TestCase.__dict__}
+    try:
+        if not nodeids:
+            return {"ok": True, "failed": [], "seen": [], "collect_errors": [], "times": {}, "suite_cpu": 0.0}
+        return run_unittest(nodeids, stop_on_fail, entry_filter)
+    finally:
+        for k, v in saved.items():
+            setattr(unittest.TestCase, k, v)
+
+
+def _merge(rep: dict, more: dict) -> None:
+    rep["failed"] = sorted(set(rep["failed"]) | set(more["failed"]))
+    rep["seen"] = sorted(set(rep["seen"]) | set(more["seen"]))
+    rep["collect_errors"] = list(rep["collect_errors"]) + list(more["collect_errors"])
+    rep["times"] = {**rep.get("times", {}), **more.get("times", {})}
+    rep["suite_cpu"] = round(rep.get("suite_cpu", 0.0) + more.get("suite_cpu", 0.0), 3)
+
+
+def _run_conditional(nodeids, entry_filter, two_stage, tpcds_id) -> dict:
+    """tpcds held under rule A1 (selected only if a cheaper candidate fails), checked
+    by the two-stage method only when that happens:
+      1. the other candidates, stopping at the first failure
+      2. if one failed: test_execute_tpcds, two-stage
+      3. if tpcds passed: the candidates step 1 did not reach
+    tpcds not run (nothing else failed) is reported in "conditional_skipped"."""
+    others = [n for n in nodeids if n != tpcds_id]
+    rep = _isolated_run(others, True, entry_filter)
+    rep["proven_pass"], rep["conditional_skipped"] = [], [tpcds_id]
+    rep["tpcds_stage"] = {"conditional": "skipped (no other candidate failed)"}
+    if not (rep["failed"] or rep["collect_errors"]):
+        return rep
+    rep["conditional_skipped"] = []
+    try:
+        import tpcplan
+
+        with open(os.path.join(TPC_STORE, "plans.json")) as f:
+            base = json.load(f)
+        changed = tpcplan.stage1(two_stage["front"], base)
+        cost = two_stage.get("cost", {})
+        stage2 = sorted(set(two_stage["data"]) | set(changed), key=lambda i: (cost.get(str(i), 0.0), i))
+        rep["tpcds_stage"] = {"conditional": "ran", "front": len(two_stage["front"]), "changed": len(changed),
+                              "stage2": len(stage2)}
+        if stage2:
+            _install_tpcds_subset(stage2)
+            more = _isolated_run([tpcds_id], False, {})
+            _merge(rep, more)
+            tp_ok = tpcds_id in more["seen"] and tpcds_id not in more["failed"] and not more["collect_errors"]
+        else:
+            rep["proven_pass"] = [tpcds_id]
+            tp_ok = True
+    except BaseException as e:  # noqa: BLE001  (tpcds stays unseen -> selected)
+        rep["tpcds_stage"] = {"conditional": "error", "error": repr(e)[:200]}
+        return rep
+    if tp_ok:
+        done = set(rep["seen"]) | set(rep["failed"])
+        rest = [n for n in others if n not in done]
+        if rest:
+            _merge(rep, _isolated_run(rest, False, entry_filter))
+    return rep
 
 
 def _install_entry_filter(entry_filter: dict, current: list) -> None:
@@ -596,6 +730,9 @@ def run_unittest(nodeids: list[str], stop_on_fail: bool = False, entry_filter=No
             last[0] = _cpu()
 
         def stopTest(self, test):
+            # Class/module fixtures (setUpClass of the next class) run between tests:
+            # they must never see the previous test's fixture-entry filter.
+            current_test[0] = None
             handler, cw = capture.pop(test.id(), (None, None))
             if cw is not None:
                 cw.__exit__(None, None, None)
@@ -640,7 +777,8 @@ class Job:
 
 
 def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], timeout_s: float,
-          import_modules=(), tpcds_indices=None, stop_on_fail=False, proxy=False, entry_filter=None) -> Job:
+          import_modules=(), tpcds_indices=None, stop_on_fail=False, proxy=False, two_stage=None,
+          entry_filter=None, conditional=False) -> Job:
     rfd, wfd = os.pipe()
     tmp_dir = os.path.join(tmp_root, str(key))
     sys.stdout.flush()
@@ -651,7 +789,7 @@ def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], time
         try:
             os.close(rfd)
             _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules, tpcds_indices, stop_on_fail,
-                   proxy, entry_filter)
+                   proxy, two_stage, entry_filter, conditional)
         except BaseException:  # noqa: BLE001
             code = 1
         finally:

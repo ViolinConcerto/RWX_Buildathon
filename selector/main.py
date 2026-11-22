@@ -60,6 +60,8 @@ MIN_GAIN = 0.15  # skip coin-flip verifications whose expected gain is within no
 TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
 MAX_NODES_ID = "tests/test_parser.py::TestParser::test_max_nodes"
 TPCDS_RUN_LIMIT = 8.0   # CPU seconds of affected TPC-DS queries we are willing to re-run
+COND_FORCE = os.environ.get("BR_COND_FORCE") == "1"  # measurement: conditional check whenever possible
+COND_RUN_LIMIT = 14.0  # expected CPU of a conditional two-stage tpcds check (blind tpcds costs 21.45 s)
 # Rule A1 (statistical, not a proof): the two tests too expensive to re-run are
 # selected only when a cheaper candidate fails. On 255 labeled patches, tpcds
 # failed 14 times and never without a sub-second test failing too.
@@ -121,6 +123,46 @@ def entry_subset(a, test_id: str):
         return None  # coverage says it reaches the edit but no entry does: be safe
     cpu = info["base_cpu"] + sum(info["groups"][f]["cpu"][i] for f, idx in picked.items() for i in idx)
     return {f: sorted(v) for f, v in picked.items()}, 1.15 * cpu + 0.01
+
+
+try:
+    with _gzip.open(HERE.parent / "maps" / "qphase.json.gz", "rt") as _f:
+        QPHASE = json.load(_f)
+    QPHASE_COMMON = {rel: set(v) for rel, v in QPHASE["common"].items()}
+except Exception:  # noqa: BLE001
+    QPHASE, QPHASE_COMMON = None, {}
+TWO_STAGE = os.environ.get("BR_TWO_STAGE", "1") == "1"
+P_PLAN_CHANGES = 0.5  # pessimistic: chance that an edit reaching a query's front changes its plan
+
+
+def tpcds_two_stage(a):
+    """Two-stage plan for test_execute_tpcds (selector/tpcplan.py), or None.
+
+    Queries whose data or compare phase executed an edited line are re-run (stage 2);
+    queries reached only through their front (parse/optimize/plan) are first re-planned
+    and compared with the pinned commit's plan (stage 1).
+    """
+    if not TWO_STAGE or QPHASE is None or a.everything or a.other_facts or not a.runtime_lines:
+        return None
+    touched = {p: set() for p in "FTDC"}
+    for rel, lines in a.runtime_lines.items():
+        if lines & QPHASE_COMMON.get(rel, set()):
+            return None  # class setup / harness code: every query is affected
+        for p in "FTDC":
+            per_line = QPHASE["lines"].get(p, {}).get(rel, {})
+            for ln in lines:
+                touched[p].update(per_line.get(str(ln), ()))
+    forced = touched["D"] | touched["C"]
+    front = (touched["F"] | touched["T"]) - forced
+    if not forced and not front:
+        return None
+    cpu_d = QPHASE["cpu"]["D"]
+    cpu_f = [f + t for f, t in zip(QPHASE["cpu"]["F"], QPHASE["cpu"].get("T", [0.0] * QPHASE["n"]))]
+    data_cost = lambda i: cpu_d[i] + 0.06  # noqa: E731  (compare answered by the TPC store)
+    cpu = 0.15 + sum(cpu_f[i] + 0.03 for i in front) + sum(cpu_f[i] + data_cost(i) for i in forced) \
+        + P_PLAN_CHANGES * sum(data_cost(i) for i in front)
+    return {"front": sorted(front), "data": sorted(forced), "cpu": cpu,
+            "cost": {str(i): round(cpu_d[i], 4) for i in front | forced}}
 
 
 def tpcds_subset(a) -> list[int] | None:
@@ -199,6 +241,10 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
     tpcds_num = next((n for n in cands if tests_by_num[n]["id"] == TPCDS_ID), None)
     subset = tpcds_subset(a) if tpcds_num is not None else None
     subset_cpu = (0.9 * sum(QMAP["suites"]["tpcds"]["cpu"][i] for i in subset)) if subset is not None else None
+    ts = tpcds_two_stage(a) if tpcds_num is not None else None
+    two_stage = None
+    if ts is not None and subset_cpu is not None and subset_cpu <= TPCDS_RUN_LIMIT and ts["cpu"] < subset_cpu:
+        subset, subset_cpu, two_stage = None, ts["cpu"], ts  # same check as the subset, cheaper
 
     # Tests too expensive to re-run here: kept or dropped by rule, never executed.
     held = []
@@ -251,6 +297,7 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
                                        tests_by_num[n]["id"].rsplit("::", 1)[0], test_cpu(n)))
     plan = {"cands": cands, "run": order, "held": held, "blind": blind, "cpu": cpu, "entries": entry_plan,
             "tpcds_subset": subset if (tpcds_num is not None and tpcds_num in run) else None,
+            "tpcds_two_stage": two_stage if (tpcds_num is not None and tpcds_num in run) else None,
             "stop_on_fail": False, "drop_held_if_clean": False}
     if held:
         if FORCE:
@@ -271,7 +318,19 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
         proxy_cpu = MAX_NODES_PROXY_CPU if use_proxy else 0.0
         if tpcds_held:
             cpu_eff = (1 - p) * cpu + p * min(cpu, fixed + 0.3 * (cpu - fixed) + 0.2)
-            expected = cpu_eff + proxy_cpu + p * blind
+            fail_cost = blind
+            if ts is not None and ts["cpu"] <= COND_RUN_LIMIT and not use_proxy:
+                # a cheaper candidate failed: check tpcds itself (two-stage); if it passes,
+                # finish the other candidates and select only what fails
+                rest = [n for n in cands if n not in held]
+                blind_rest = cost_of(partition(rest, dur), dur) / 1000
+                light = min(blind_rest, 2.0 + 0.3 * max(0.0, blind_rest - 2.0)) if rest else 2.0
+                q = P_TPCDS_GIVEN_BREAK
+                cond_cost = ts["cpu"] + q * blind + (1 - q) * (light + 0.7 * (cpu - fixed))
+                if cond_cost < blind or COND_FORCE:
+                    fail_cost = cond_cost
+                    plan["tpcds_conditional"] = ts
+            expected = cpu_eff + proxy_cpu + p * fail_cost
             plan.update(stop_on_fail=True)
         else:
             heavy_blind = max(dur[n] for n in held) / 1000
@@ -631,10 +690,14 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                 continue
             a = analyses[cid]
             nodeids = [tests_by_num[x]["id"] for x in plan["run"]]
-            timeout = min(remaining, max(8.0, 4 * plan["cpu"] + 5))
-            job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout, sorted(a.import_check),
+            cond = plan.get("tpcds_conditional")
+            timeout = min(remaining, max(8.0, 4 * (plan["cpu"] + (cond["cpu"] if cond else 0.0)) + 5))
+            job = verify.start(cid, SRC, TMP, a.new_files, nodeids + ([TPCDS_ID] if cond else []), timeout,
+                               sorted(a.import_check),
                                plan.get("tpcds_subset"), plan["stop_on_fail"], bool(plan.get("proxy")),
-                               {k: v for k, v in plan.get("entries", {}).items() if k in set(nodeids)})
+                               cond or plan.get("tpcds_two_stage"),
+                               {k: v for k, v in plan.get("entries", {}).items() if k in set(nodeids)},
+                               conditional=bool(cond))
             meta[cid] = plan
             jobs.append(job)
         if not jobs:
@@ -656,14 +719,21 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                 continue
             analyses[cid].import_ok = True
             failed_ids = set(report["failed"])
-            seen = set(report["seen"])
+            seen = set(report["seen"]) | set(report.get("proven_pass", ()))
+            if report.get("tpcds_stage"):
+                log(f"{cid}: tpcds two-stage {report['tpcds_stage']}")
             id2num = {tests_by_num[x]["id"]: x for x in plan["run"]}
+            held = list(plan["held"])
+            if plan.get("tpcds_conditional") and TPCDS_ID not in report.get("conditional_skipped", ()):
+                tp = next(h for h in held if tests_by_num[h]["id"] == TPCDS_ID)
+                held.remove(tp)  # it was run: its own outcome decides
+                id2num[TPCDS_ID] = tp
             failing = {id2num[i] for i in failed_ids if i in id2num}
             unseen = {num for i, num in id2num.items() if i not in seen}
             for ce in report["collect_errors"]:
                 failing |= {num for i, num in id2num.items() if i == ce or i.startswith(ce + "::")}
             chosen = failing | unseen | set(plan.get("blind_rest", ()))
-            for h in plan["held"]:
+            for h in held:
                 hid = tests_by_num[h]["id"]
                 if hid == MAX_NODES_ID and plan.get("proxy"):
                     verdict = report.get("proxy", {}).get("max_nodes")
@@ -672,9 +742,9 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
                     log(f"{cid}: max_nodes stand-in {verdict} ({report.get('proxy', {}).get('max_nodes_cpu')}s)")
                 elif chosen or not plan["drop_held_if_clean"]:
                     chosen.add(h)
-            if chosen - set(plan["held"]) and any(tests_by_num[h]["id"] == TPCDS_ID for h in plan["held"]) \
+            if chosen - set(held) and any(tests_by_num[h]["id"] == TPCDS_ID for h in held) \
                     and plan["drop_held_if_clean"]:
-                chosen |= {h for h in plan["held"] if tests_by_num[h]["id"] == TPCDS_ID}
+                chosen |= {h for h in held if tests_by_num[h]["id"] == TPCDS_ID}
             results[cid] = partition(chosen, dur)
             send_answer("F", cid, results[cid])  # verified (imports checked in the child): final
             if plan.get("tpcds_subset") is not None:
