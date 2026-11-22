@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from patchlib import FileChange, PatchError, apply_change, parse_patch
 from equiv import proven_equivalent
+from predsens import affected_tests
 from pydiff import Broad, ClassHeader, Definition, Runtime, diff_python
 
 
@@ -108,11 +109,12 @@ def module_name(rel: str) -> str:
 
 
 class StaticSelector:
-    def __init__(self, depmap: DepMap, src_root: str, tests: list[dict], cmp_profile=None):
+    def __init__(self, depmap: DepMap, src_root: str, tests: list[dict], cmp_profile=None, predmap=None):
         self.map = depmap
         self.src = src_root
         self.tests = tests
         self.cmp_profile = cmp_profile
+        self.predmap = predmap
         self.all = {t["number"] for t in tests}
         self.by_file: dict[str, set[int]] = {}
         for t in tests:
@@ -253,10 +255,19 @@ class StaticSelector:
                         continue
                     if "swap" in why or "profiled" in why or "provable" in why:
                         a.reasons.append(f"{rel}:{min(fact.lines)} equivalence not proven: {why}")
+                at_import = self._ran_at_import(rel, old, fact.lines, imp)
+                if fact.old is not None and not at_import and self.predmap is not None and old_tree is not None:
+                    aff, why = affected_tests(self.predmap, rel, fact.old, fact.new, old_tree)
+                    if aff is not None:
+                        a.candidates |= aff
+                        a.runtime_lines.setdefault(rel, set()).update(fact.lines)
+                        a.reasons.append(f"{rel}:{min(fact.lines)} predicate-sensitive [{why}] -> {len(aff)} "
+                                         f"(line coverage {len(self.map.line_tests(rel, fact.lines))})")
+                        continue
                 tests = self.map.line_tests(rel, fact.lines)
                 a.candidates |= tests
                 a.runtime_lines.setdefault(rel, set()).update(fact.lines)
-                if self._ran_at_import(rel, old, fact.lines, imp):
+                if at_import:
                     a.other_facts = True
                     # Code that runs at import time (class creation helpers, metaclasses).
                     names = self._enclosing_functions(old, fact.lines)

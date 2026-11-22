@@ -26,6 +26,7 @@ DATA = Path(os.environ.get("BR_DATA", "/data"))
 SRC = os.path.abspath(os.environ.get("BR_SRC", "/opt/sqlglot"))
 MAP = os.environ.get("BR_MAP", str(HERE.parent / "maps" / "depmap.json.gz"))
 CMP_PROFILE = os.environ.get("BR_CMP", str(HERE.parent / "maps" / "cmp_profile.json.gz"))
+PRED_MAP = os.environ.get("BR_PRED", str(HERE.parent / "maps" / "predmap.json.gz"))
 TMP = os.environ.get("BR_TMP", "/tmp/br")
 VERIFY = os.environ.get("BR_VERIFY", "1") == "1"
 PARALLEL = int(os.environ.get("BR_PARALLEL", "2"))
@@ -198,7 +199,15 @@ def main() -> int:
                 profile = CmpProfile(CMP_PROFILE)
             except Exception as e:  # noqa: BLE001
                 log(f"comparison profile unavailable: {type(e).__name__}: {e}")
-        selector = StaticSelector(depmap, SRC, tests, profile)
+        predmap = None
+        if os.path.exists(PRED_MAP):
+            try:
+                from predsens import PredMap
+
+                predmap = PredMap(PRED_MAP, tests)
+            except Exception as e:  # noqa: BLE001
+                log(f"predicate map unavailable: {type(e).__name__}: {e}")
+        selector = StaticSelector(depmap, SRC, tests, profile, predmap)
         log(f"map loaded in {time.monotonic() - t0:.2f}s; {len(depmap.unmapped)} tests not in map")
     except Exception as e:  # noqa: BLE001
         log(f"FATAL map load: {type(e).__name__}: {e}; running everything")

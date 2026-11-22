@@ -3,7 +3,7 @@
 # Runs the full sqlglot suite once per patch (plus "none") in the lab image,
 # each container pinned to its own 4-CPU set. Writes <out_dir>/<id>.json.
 set -u
-CDIR=$(realpath "$1"); OUT=$(realpath "$2"); PAR=${3:-6}
+CDIR=$(realpath "$1"); OUT=$(realpath "$2"); PAR=${3:-6}; CPU0=${4:-0}
 LAB=$(cd "$(dirname "$0")" && pwd)
 export PATH="$LAB/../bin:$PATH"
 mkdir -p "$OUT"
@@ -14,7 +14,7 @@ for id in $ids; do
   slot=$(( i % PAR )); i=$((i+1))
   echo "$slot $id"
 done | xargs -P "$PAR" -L 1 sh -c '
-  slot=$0; id=$1; c0=$((slot*4)); c1=$((c0+3))
+  slot=$0; id=$1; c0=$(('"$CPU0"'+slot*4)); c1=$((c0+3))
   if [ "$id" = none ]; then p=none; else p=/commits/$id.patch; fi
   start=$(date +%s)
   docker run --rm --cpuset-cpus $c0-$c1 --memory 2400m \
