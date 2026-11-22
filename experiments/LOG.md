@@ -77,3 +77,19 @@ tpcds per-line query subsets: 39% of lines reach <=5 queries, 46% reach >=36 (no
 
 Practice: probe (r12 minus heavy) = 421.627 sim, 1 missed => heavy three cost 76.9 s of r12's 198.5 s; 1 commit needs one.
 Practice: r14 = 178.7 s (172.387 sim + 6.3 CPU), 0 missed (r12 -22.7 s).
+
+Practice: r15 = 178.0 s (172.387 sim — identical to r14 — + 5.6 CPU), 0 missed: generator_memory
+was not a deciding factor on practice after r13.
+Practice: probe3 (r15 minus heavy) = 415.574 sim, 1 missed => heavy three still cost 56.8 s of r15's
+172.4 s; non-heavy remainder 115.6 s alone exceeds 100 s, so both buckets must shrink.
+
+| r16 | predicate-sensitivity narrowing for operator edits (maps/predmap.json.gz, selector/predsens.py) | 116.83* | 861.42* | 49.30* | 0/0/0, o2 0, adv 0 | pending |
+
+\* CPU inflated by concurrent labeling containers; simulated equals r15 on sample/m1/tp.
+o2 (24 comparison swaps, full-suite labels, 13 breaking): rule applied to 20, narrowed 14
+(e.g. 37 -> 2, 29 -> 1 candidates), 0 misses. o1 (39 and/or swaps, 37 breaking): applied 34,
+narrowed 8 (231 -> 2, 104 -> 29), 0 misses. Official-flag runs: o1 538.1, o2 193.0, sample 115.79; 0 misses.
+
+Decisions: optimizer per-fixture-entry partial verification parked (sample upside ~2.5 s once
+4d63 is excluded; m1 bulk is executor hot paths). Fixture-comment equivalence parked (some
+tests read raw text). Entry-level dict dependencies parked (metaclasses derive structures).
