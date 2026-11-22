@@ -64,6 +64,11 @@ TPCDS_RUN_LIMIT = 8.0   # CPU seconds of affected TPC-DS queries we are willing 
 # failed 14 times and never without a sub-second test failing too.
 RULE_A1 = os.environ.get("BR_A1", "1") == "1"
 FORCE = os.environ.get("BR_FORCE", "0") == "1"  # measurement probes: verify everything runnable
+# test_max_nodes' scaled stand-in (statistical, not a proof): 1/25 of the width and of
+# the node limits, same nesting depth; fails/raises/times out or runs >3x slower than
+# on the pinned commit => max_nodes is selected. BR_MAXNODES_PROXY=0 disables it.
+MAX_NODES_PROXY = os.environ.get("BR_MAXNODES_PROXY", "1") == "1"
+MAX_NODES_PROXY_CPU = 0.94  # measured on the pinned commit (container)
 # P(test_execute_tpcds itself fails | the commit breaks something), for commits
 # that reach it through few queries (labeled sets: 1 of 4); kept pessimistic.
 P_TPCDS_GIVEN_BREAK = 0.6
@@ -197,7 +202,9 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
         if tid == MAX_NODES_ID or (tid == TPCDS_ID and (subset_cpu is None or subset_cpu > TPCDS_RUN_LIMIT)):
             held.append(n)
     run = [n for n in cands if n not in held]
-    if not run:
+    proxy_ok = (MAX_NODES_PROXY and any(tests_by_num[n]["id"] == MAX_NODES_ID for n in held)
+                and "tests/test_parser.py" not in a.new_files and "tests/helpers.py" not in a.new_files)
+    if not run and not (proxy_ok and all(tests_by_num[n]["id"] == MAX_NODES_ID for n in held)):
         return None
     files = {tests_by_num[n]["file"] for n in run}
 
@@ -242,15 +249,31 @@ def plan_verification(a, tests_by_num, dur) -> dict | None:
         if FORCE:
             plan["gain"] = 1.0  # probe: exact outcome of everything runnable, held tests kept
             return plan
-        if not RULE_A1:
+        held_ids = {tests_by_num[n]["id"] for n in held}
+        use_proxy = (MAX_NODES_ID in held_ids and MAX_NODES_PROXY
+                     and "tests/test_parser.py" not in a.new_files and "tests/helpers.py" not in a.new_files)
+        tpcds_held = TPCDS_ID in held_ids
+        if not RULE_A1 and (tpcds_held or not use_proxy):
             return None
-        # Rule A1: held tests are selected only if some runnable candidate fails.
-        # Stop at the first failure: the rest are then selected unrun (they ride
-        # along under the held test's load).
+        plan["proxy"] = use_proxy
+        # Held tests: tpcds (rule A1) is selected only if a runnable candidate fails;
+        # max_nodes is decided by its scaled stand-in when available, else by A1.
+        # With tpcds held, stop at the first failure: the remaining tests are then
+        # selected unrun (they ride along under tpcds' load).
         fixed = BASE_OVERHEAD + sum(file_setup(f) for f in files)
-        cpu_eff = (1 - p) * cpu + p * min(cpu, fixed + 0.3 * (cpu - fixed) + 0.2)
-        expected = cpu_eff + p * blind
-        plan.update(stop_on_fail=True, drop_held_if_clean=True, gain=blind - expected, cpu=cpu)
+        proxy_cpu = MAX_NODES_PROXY_CPU if use_proxy else 0.0
+        if tpcds_held:
+            cpu_eff = (1 - p) * cpu + p * min(cpu, fixed + 0.3 * (cpu - fixed) + 0.2)
+            expected = cpu_eff + proxy_cpu + p * blind
+            plan.update(stop_on_fail=True)
+        else:
+            heavy_blind = max(dur[n] for n in held) / 1000
+            rest = [n for n in cands if n not in held]
+            blind_rest = cost_of(partition(rest, dur), dur) / 1000
+            light = min(blind_rest, 2.0 + 0.3 * max(0.0, blind_rest - 2.0)) if rest else 2.0
+            p_heavy = 0.3  # P(max_nodes itself fails | it is a candidate): no labeled case so far
+            expected = cpu + proxy_cpu + p_heavy * (heavy_blind + 2.0 + light) + (1 - p_heavy) * p * light
+        plan.update(drop_held_if_clean=True, gain=blind - expected, cpu=cpu + proxy_cpu)
         return plan if plan["gain"] >= MIN_GAIN else None
     if tpcds_num is not None:
         rest = [n for n in cands if n != tpcds_num]
@@ -413,7 +436,7 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             nodeids = [tests_by_num[x]["id"] for x in plan["run"]]
             timeout = min(remaining, max(8.0, 4 * plan["cpu"] + 5))
             job = verify.start(cid, SRC, TMP, a.new_files, nodeids, timeout, sorted(a.import_check),
-                               plan.get("tpcds_subset"), plan["stop_on_fail"],
+                               plan.get("tpcds_subset"), plan["stop_on_fail"], bool(plan.get("proxy")),
                                {k: v for k, v in plan.get("entries", {}).items() if k in set(nodeids)})
             meta[cid] = plan
             jobs.append(job)
@@ -442,8 +465,18 @@ def verify_all(analyses, results, tests_by_num, dur, n, t0, planned, full) -> No
             for ce in report["collect_errors"]:
                 failing |= {num for i, num in id2num.items() if i == ce or i.startswith(ce + "::")}
             chosen = failing | unseen
-            if plan["held"] and (chosen or not plan["drop_held_if_clean"]):
-                chosen |= set(plan["held"])
+            for h in plan["held"]:
+                hid = tests_by_num[h]["id"]
+                if hid == MAX_NODES_ID and plan.get("proxy"):
+                    verdict = report.get("proxy", {}).get("max_nodes")
+                    if verdict != "pass":
+                        chosen.add(h)
+                    log(f"{cid}: max_nodes stand-in {verdict} ({report.get('proxy', {}).get('max_nodes_cpu')}s)")
+                elif chosen or not plan["drop_held_if_clean"]:
+                    chosen.add(h)
+            if chosen - set(plan["held"]) and any(tests_by_num[h]["id"] == TPCDS_ID for h in plan["held"]) \
+                    and plan["drop_held_if_clean"]:
+                chosen |= {h for h in plan["held"] if tests_by_num[h]["id"] == TPCDS_ID}
             results[cid] = partition(chosen, dur)
             if plan.get("tpcds_subset") is not None:
                 log(f"{cid}: tpcds restricted to {len(plan['tpcds_subset'])} queries")

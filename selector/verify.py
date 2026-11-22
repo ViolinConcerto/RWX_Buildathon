@@ -234,9 +234,69 @@ def _install_tpcds_subset(indices: list[int]) -> None:
     cls.setUpClass = classmethod(setUpClass)
 
 
+MAX_NODES_PROXY_BASE_CPU = 0.94  # stand-in CPU on the pinned commit (container measurement)
+
+
+def _max_nodes_proxy(limit_s: float = 6.0) -> tuple[str, float]:
+    """Scaled-down stand-in for tests/test_parser.py::TestParser::test_max_nodes.
+
+    Same assertions with 1/25 of the width and of the node limits (nesting depth
+    unchanged). Returns ("pass"|"fail"|"timeout"|"slow", cpu seconds).
+    """
+    import resource
+
+    from sqlglot import exp, parse_one
+    from sqlglot.errors import ParseError
+
+    def cpu():
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        return r.ru_utime + r.ru_stime
+
+    class _Timeout(BaseException):
+        pass
+
+    def on_alarm(signum, frame):
+        raise _Timeout()
+
+    k = 25
+    t0 = cpu()
+    old = signal.signal(signal.SIGALRM, on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, limit_s)
+    try:
+        if not isinstance(parse_one("SELECT 1", max_nodes=1_000_000 // k), exp.Select):
+            return "fail", cpu() - t0
+        cols = [f"col{i}" for i in range(500)]
+        if not isinstance(parse_one(f"SELECT {','.join(cols)} FROM t", max_nodes=1_000_000 // k), exp.Select):
+            return "fail", cpu() - t0
+        sql = "SELECT " + ",".join(["x" + "=x" * 100 for _ in range(10000 // k)])
+        for limit, needle in ((1_000_000 // k, "Maximum number of AST nodes"), (50_000 // k, f"({50_000 // k})")):
+            try:
+                parse_one(sql, max_nodes=limit)
+                return "fail", cpu() - t0
+            except ParseError as e:
+                if needle not in str(e):
+                    return "fail", cpu() - t0
+        try:
+            parse_one("SELECT " + ",".join(f"x={i}" for i in range(100)), max_nodes=5)
+            return "fail", cpu() - t0
+        except ParseError:
+            pass
+        if not isinstance(parse_one("SELECT 1, 2, 3"), exp.Select):
+            return "fail", cpu() - t0
+    except _Timeout:
+        return "timeout", cpu() - t0
+    except Exception:  # noqa: BLE001
+        return "fail", cpu() - t0
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+    used = cpu() - t0
+    return ("slow" if used > 3 * MAX_NODES_PROXY_BASE_CPU else "pass"), used
+
+
 def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], nodeids: list[str],
            timeout_s: float, wfd: int, import_modules=(), tpcds_indices=None, stop_on_fail=False,
-           entry_filter=None) -> None:
+           proxy=False, entry_filter=None) -> None:
     # The selector's own heap (dependency map, cached ASTs) is inherited by the
     # fork; freeze it so tests that call gc.collect() do not traverse it.
     import gc
@@ -319,6 +379,10 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             view = view[os.write(wfd, view):]
         os.close(wfd)
         return
+    proxy_report = {}
+    if proxy:
+        verdict, used = _max_nodes_proxy()
+        proxy_report = {"max_nodes": verdict, "max_nodes_cpu": round(used, 3)}
     try:
         if os.environ.get("BR_RUNNER") == "pytest":
             import pytest
@@ -333,6 +397,7 @@ def _child(src_root: str, tmp_dir: str, new_files: dict[str, bytes | None], node
             report = run_unittest(nodeids, stop_on_fail, entry_filter or {})
     except BaseException as e:  # noqa: BLE001
         report = {"ok": False, "error": repr(e)}
+    report["proxy"] = proxy_report
     data = json.dumps(report).encode()
     view = memoryview(data)
     while view:
@@ -575,7 +640,7 @@ class Job:
 
 
 def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], timeout_s: float,
-          import_modules=(), tpcds_indices=None, stop_on_fail=False, entry_filter=None) -> Job:
+          import_modules=(), tpcds_indices=None, stop_on_fail=False, proxy=False, entry_filter=None) -> Job:
     rfd, wfd = os.pipe()
     tmp_dir = os.path.join(tmp_root, str(key))
     sys.stdout.flush()
@@ -586,7 +651,7 @@ def start(key, src_root: str, tmp_root: str, new_files, nodeids: list[str], time
         try:
             os.close(rfd)
             _child(src_root, tmp_dir, new_files, nodeids, timeout_s, wfd, import_modules, tpcds_indices, stop_on_fail,
-                   entry_filter)
+                   proxy, entry_filter)
         except BaseException:  # noqa: BLE001
             code = 1
         finally:
