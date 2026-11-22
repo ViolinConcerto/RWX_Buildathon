@@ -66,6 +66,7 @@ TPCDS_RUN_LIMIT = 8.0   # CPU seconds of affected TPC-DS queries we are willing 
 RULE_A1 = os.environ.get("BR_A1", "1") == "1"
 STATEDIFF = os.environ.get("BR_STATEDIFF", "1") == "1"
 STATEFP_PATH = os.environ.get("BR_STATEFP", "/opt/statefp.json")
+STATEDIFF_MIN_GAIN = float(os.environ.get("BR_STATEDIFF_MIN", "3.0"))
 FORCE = os.environ.get("BR_FORCE", "0") == "1"  # measurement probes: verify everything runnable
 EXACT = os.environ.get("BR_EXACT", "0") == "1"  # offline only: also run tpcds / max_nodes for real
 # test_max_nodes' scaled stand-in (statistical, not a proof): 1/25 of the width and of
@@ -527,7 +528,19 @@ def main() -> int:
 def refine_all(selector, analyses, results, full, dur) -> None:
     import verify
 
-    todo = [cid for cid, a in analyses.items() if a.import_check and not a.base_everything]
+    # A state diff costs ~0.7 s CPU (fork, import every module, fingerprint ~17k bindings).
+    # Only worth it when the definition-time rules add a lot to the static answer; small
+    # sets are left to verification (which imports the patched modules anyway).
+    todo = []
+    for cid, a in analyses.items():
+        if not a.import_check or a.base_everything:
+            continue
+        with_def = cost_of(full if a.everything else partition(a.candidates, dur), dur) / 1000
+        without = cost_of(partition(a.base_candidates, dur), dur) / 1000
+        if with_def - without >= STATEDIFF_MIN_GAIN:
+            todo.append(cid)
+        else:
+            log(f"{cid}: state diff skipped (definition rules add only {with_def - without:.2f}s)")
     jobs: list = []
     while todo or jobs:
         while todo and len(jobs) < PARALLEL:
